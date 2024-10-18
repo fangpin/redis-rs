@@ -1,7 +1,8 @@
-use anyhow::Result;
 use crate::protocol::Protocol;
+use anyhow::Result;
 
 pub enum Cmd {
+    Ping,
     Echo(String),
     Unknown(),
 }
@@ -11,15 +12,16 @@ impl Cmd {
         let protocol = Protocol::from(s)?;
         match protocol.0 {
             Protocol::Array(p) => {
-                let cmd = p.into_iter().map(|x| x.encode()).collect::<Vec<_>>();
+                let cmd = p.into_iter().map(|x| x.decode()).collect::<Vec<_>>();
                 if cmd.len() == 0 {
-                    return Err(anyhow::anyhow!("cmd length is 0"))
+                    return Err(anyhow::anyhow!("cmd length is 0"));
                 }
                 Ok(match cmd[0].as_str() {
                     "echo" => Cmd::Echo(cmd[1].clone()),
+                    "ping" => Cmd::Ping,
                     _ => Cmd::Unknown(),
                 })
-            },
+            }
             _ => Err(anyhow::anyhow!("fail to parse as cmd for {:?}", protocol.0)),
         }
     }
@@ -27,7 +29,8 @@ impl Cmd {
     pub fn run(self: &Self) -> Result<Protocol> {
         match self {
             Cmd::Echo(s) => Ok(Protocol::SimpleString(s.clone())),
-            _ => Err(anyhow::anyhow!("unknown cmd"))
+            Cmd::Ping => Ok(Protocol::SimpleString("PONG".to_string())),
+            _ => Err(anyhow::anyhow!("unknown cmd")),
         }
     }
 }

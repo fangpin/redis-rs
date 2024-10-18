@@ -1,3 +1,3 @@
-pub mod handler;
 mod cmd;
+pub mod handler;
 mod protocol;
