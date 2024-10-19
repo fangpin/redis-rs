@@ -1,6 +1,6 @@
 # Build Your Own Redis
 
-To build a toy Redis-Server clone that's capable of handling
+This project is to build a toy Redis-Server clone that's capable of handling
 basic commands like `PING`, `SET` and `GET`. Also implement the event loops, the Redis protocol and more.
 
 ## Prerequisites
@@ -21,6 +21,10 @@ redis-cli ECHO hey
 
 ```sh
 redis-cli SET foo bar
+```
+
+```sh
+redis-cli SET foo bar px 100
 ```
 
 ```sh

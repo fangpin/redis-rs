@@ -2,7 +2,7 @@
 name = "redis-rs"
 version = "0.0.1"
 authors = ["Pin Fang <fpfangpin@hotmail.com>"]
-edition = "2024"
+edition = "2021"
 
 [dependencies]
 anyhow = "1.0.59"

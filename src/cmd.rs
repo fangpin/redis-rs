@@ -8,6 +8,8 @@ pub enum Cmd {
     Echo(String),
     Get(String),
     Set(String, String),
+    SetPx(String, String, u128),
+    SetEx(String, String, u128),
 }
 
 impl Cmd {
@@ -23,7 +25,15 @@ impl Cmd {
                     "echo" => Cmd::Echo(cmd[1].clone()),
                     "ping" => Cmd::Ping,
                     "get" => Cmd::Get(cmd[1].clone()),
-                    "set" => Cmd::Set(cmd[1].clone(), cmd[2].clone()),
+                    "set" => {
+                        if cmd.len() == 5 && cmd[3] == "px" {
+                            Cmd::SetPx(cmd[1].clone(), cmd[2].clone(), cmd[4].parse().unwrap())
+                        } else if cmd.len() == 5 && cmd[3] == "ex" {
+                            Cmd::SetEx(cmd[1].clone(), cmd[2].clone(), cmd[4].parse().unwrap())
+                        } else {
+                            Cmd::Set(cmd[1].clone(), cmd[2].clone())
+                        }
+                    }
                     _ => return Err(anyhow::anyhow!("unknown cmd {:?}", cmd[0])),
                 })
             }
@@ -42,11 +52,25 @@ impl Cmd {
                 } else {
                     Protocol::Null
                 })
-            },
+            }
             Cmd::Set(k, v) => {
                 {
                     let mut s = storage.lock().unwrap();
                     s.set(k.clone(), v.clone());
+                }
+                Ok(Protocol::ok())
+            }
+            Cmd::SetPx(k, v, x) => {
+                {
+                    let mut s = storage.lock().unwrap();
+                    s.setx(k.clone(), v.clone(), *x);
+                }
+                Ok(Protocol::ok())
+            }
+            Cmd::SetEx(k, v, x) => {
+                {
+                    let mut s = storage.lock().unwrap();
+                    s.setx(k.clone(), v.clone(), *x * 1000);
                 }
                 Ok(Protocol::ok())
             }

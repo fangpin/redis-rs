@@ -1,6 +1,6 @@
 #![allow(unused_imports)]
 
-use redis_starter_rust::server;
+use redis_rs::server;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
