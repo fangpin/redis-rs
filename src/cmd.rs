@@ -1,6 +1,4 @@
-use std::sync::{Arc, Mutex};
-
-use crate::{protocol::Protocol, storage::Storage};
+use crate::{protocol::Protocol, server::Server};
 use anyhow::Result;
 
 pub enum Cmd {
@@ -10,6 +8,7 @@ pub enum Cmd {
     Set(String, String),
     SetPx(String, String, u128),
     SetEx(String, String, u128),
+    ConfigGet(String),
 }
 
 impl Cmd {
@@ -34,6 +33,13 @@ impl Cmd {
                             Cmd::Set(cmd[1].clone(), cmd[2].clone())
                         }
                     }
+                    "config" => {
+                        if cmd.len() != 3 || cmd[1] != "get" {
+                            return Err(anyhow::anyhow!("unsupported cmd {:?}", cmd));
+                        } else {
+                            Cmd::ConfigGet(cmd[2].clone())
+                        }
+                    }
                     _ => return Err(anyhow::anyhow!("unknown cmd {:?}", cmd[0])),
                 })
             }
@@ -41,12 +47,12 @@ impl Cmd {
         }
     }
 
-    pub fn run(self: &Self, storage: &mut Arc<Mutex<Storage>>) -> Result<Protocol> {
+    pub fn run(self: &Self, server: &mut Server) -> Result<Protocol> {
         match self {
             Cmd::Ping => Ok(Protocol::SimpleString("PONG".to_string())),
             Cmd::Echo(s) => Ok(Protocol::SimpleString(s.clone())),
             Cmd::Get(k) => {
-                let s = storage.lock().unwrap();
+                let s = server.storage.lock().unwrap();
                 Ok(if let Some(v) = s.get(k) {
                     Protocol::SimpleString(v.clone())
                 } else {
@@ -55,25 +61,36 @@ impl Cmd {
             }
             Cmd::Set(k, v) => {
                 {
-                    let mut s = storage.lock().unwrap();
+                    let mut s = server.storage.lock().unwrap();
                     s.set(k.clone(), v.clone());
                 }
                 Ok(Protocol::ok())
             }
             Cmd::SetPx(k, v, x) => {
                 {
-                    let mut s = storage.lock().unwrap();
+                    let mut s = server.storage.lock().unwrap();
                     s.setx(k.clone(), v.clone(), *x);
                 }
                 Ok(Protocol::ok())
             }
             Cmd::SetEx(k, v, x) => {
                 {
-                    let mut s = storage.lock().unwrap();
+                    let mut s = server.storage.lock().unwrap();
                     s.setx(k.clone(), v.clone(), *x * 1000);
                 }
                 Ok(Protocol::ok())
             }
+            Cmd::ConfigGet(name) => match name.as_str() {
+                "dir" => Ok(Protocol::Array(vec![
+                    Protocol::BulkString(name.clone()),
+                    Protocol::BulkString(server.option.dir.clone()),
+                ])),
+                "dbfilename" => Ok(Protocol::Array(vec![
+                    Protocol::BulkString(name.clone()),
+                    Protocol::BulkString(server.option.db_file_name.clone()),
+                ])),
+                _ => Err(anyhow::anyhow!("unsupported config {:?}", name)),
+            },
         }
     }
 }

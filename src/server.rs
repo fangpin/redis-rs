@@ -5,17 +5,20 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 
 use crate::cmd::Cmd;
+use crate::options;
 use crate::storage::Storage;
 
 #[derive(Clone)]
 pub struct Server {
-    storage: Arc<Mutex<Storage>>,
+    pub storage: Arc<Mutex<Storage>>,
+    pub option: options::DBOption,
 }
 
 impl Server {
-    pub fn new() -> Self {
+    pub fn new(option: options::DBOption) -> Self {
         Server {
             storage: Arc::new(Mutex::new(Storage::new())),
+            option: option,
         }
     }
 
@@ -29,7 +32,7 @@ impl Server {
                 }
                 let s = str::from_utf8(&buf[..len]).unwrap();
                 let cmd = Cmd::from(s).unwrap();
-                let res = cmd.run(&mut self.storage).unwrap();
+                let res = cmd.run(self).unwrap();
                 println!("going to send response {}", res.encode());
                 stream.write_all(res.encode().as_bytes()).await.unwrap();
                 println!("finish processing");

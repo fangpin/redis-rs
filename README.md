@@ -9,6 +9,11 @@ install `redis-cli` first (an implementation of redis client for test purpose)
 cargo install mini-redis
 ```
 
+## Start the Redis-rs server
+```sh
+cargo run -- --dir /tmp/redis-files --dbfilename dump.rdb
+```
+
 
 ## Supported Commands
 ```sh
@@ -29,4 +34,12 @@ redis-cli SET foo bar px 100
 
 ```sh
 redis-cli GET foo
+```
+
+
+
+## RDB Persistence
+Get Redis-rs server config
+```sh
+redis-cli CONFIG GET dbfilename
 ```

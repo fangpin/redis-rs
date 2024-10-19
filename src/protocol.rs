@@ -48,7 +48,7 @@ impl Protocol {
             Protocol::SimpleString(s) => format!("+{}\r\n", s),
             Protocol::BulkString(s) => format!("${}\r\n{}\r\n", s.len(), s),
             Protocol::Array(ss) => {
-                format!("${}\r\n", ss.len())
+                format!("*{}\r\n", ss.len())
                     + ss.into_iter()
                         .map(|x| x.encode())
                         .collect::<Vec<_>>()
