@@ -189,7 +189,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "redis-starter-rust"
+name = "redis-rs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
