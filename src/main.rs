@@ -1,6 +1,6 @@
 #![allow(unused_imports)]
 
-use redis_starter_rust::handler;
+use redis_starter_rust::server;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -10,6 +10,7 @@ async fn main() {
     println!("Logs from your program will appear here!");
 
     let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();
+    let server = server::Server::new();
 
     loop {
         let stream = listener.accept().await;
@@ -17,8 +18,9 @@ async fn main() {
             Ok((stream, _)) => {
                 println!("accepted new connection");
 
+                let mut sc = server.clone();
                 tokio::spawn(async move {
-                    handler::handle(stream).await;
+                    sc.handle(stream).await;
                 });
             }
             Err(e) => {

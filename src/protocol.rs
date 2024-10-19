@@ -4,6 +4,7 @@ use anyhow::Result;
 pub enum Protocol {
     SimpleString(String),
     BulkString(String),
+    Null,
     Array(Vec<Protocol>),
 }
 
@@ -24,10 +25,16 @@ impl Protocol {
         }
     }
 
+    #[inline]
+    pub fn ok() -> Self {
+        Protocol::SimpleString("ok".to_string())
+    }
+
     pub fn decode(self: &Self) -> String {
         match self {
             Protocol::SimpleString(s) => s.to_string(),
             Protocol::BulkString(s) => s.to_string(),
+            Protocol::Null => "".to_string(),
             Protocol::Array(s) => s
                 .into_iter()
                 .map(|x| x.decode())
@@ -48,6 +55,7 @@ impl Protocol {
                         .join("")
                         .as_str()
             }
+            Protocol::Null => "$-1\r\n".to_string(),
         }
     }
 
