@@ -1,24 +1,47 @@
 use core::str;
+use std::fs;
+use std::fs::OpenOptions;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::RwLock;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 
 use crate::cmd::Cmd;
 use crate::options;
+use crate::rdb;
 use crate::storage::Storage;
 
 #[derive(Clone)]
 pub struct Server {
-    pub storage: Arc<Mutex<Storage>>,
+    pub storage: Arc<RwLock<Storage>>,
     pub option: options::DBOption,
 }
 
 impl Server {
     pub fn new(option: options::DBOption) -> Self {
-        Server {
-            storage: Arc::new(Mutex::new(Storage::new())),
+        let mut server = Server {
+            storage: Arc::new(RwLock::new(Storage::new())),
             option: option,
+        };
+
+        server.init();
+        server
+    }
+
+    pub fn init(self: &mut Self) {
+        let db_file_path =
+            PathBuf::from(self.option.dir.clone()).join(self.option.db_file_name.clone());
+
+        // create empty db file if not exits
+        let file = OpenOptions::new()
+            .read(true)
+            .create(true)
+            .open(db_file_path.clone())
+            .unwrap();
+
+        if fs::metadata(db_file_path).unwrap().len() != 0 {
+            rdb::parse_db(&file, self).unwrap();
         }
     }
 

@@ -1,4 +1,4 @@
-use anyhow::Result;
+use crate::error::Error;
 
 #[derive(Debug)]
 pub enum Protocol {
@@ -9,15 +9,15 @@ pub enum Protocol {
 }
 
 impl Protocol {
-    pub fn from(protocol: &str) -> Result<(Self, usize)> {
+    pub fn from(protocol: &str) -> Result<(Self, usize), Error> {
         let ret = match protocol.chars().nth(0) {
             Some('+') => Self::parse_simple_string_sfx(&protocol[1..]),
             Some('$') => Self::parse_bulk_string_sfx(&protocol[1..]),
             Some('*') => Self::parse_array_sfx(&protocol[1..]),
-            _ => Err(anyhow::anyhow!(
+            _ => Err(Error::E(format!(
                 "[from] unsupported protocol: {:?}",
                 protocol
-            )),
+            ))),
         };
         match ret {
             Ok((p, s)) => Ok((p, s + 1)),
@@ -59,26 +59,26 @@ impl Protocol {
         }
     }
 
-    fn parse_simple_string_sfx(protocol: &str) -> Result<(Self, usize)> {
+    fn parse_simple_string_sfx(protocol: &str) -> Result<(Self, usize), Error> {
         match protocol.find("\r\n") {
             Some(x) => Ok((Self::SimpleString(protocol[..x].to_string()), x + 2)),
-            _ => Err(anyhow::anyhow!(format!(
+            _ => Err(Error::E(format!(
                 "[new simple string] unsupported protocol: {:?}",
                 protocol
             ))),
         }
     }
 
-    fn parse_bulk_string_sfx(protocol: &str) -> Result<(Self, usize)> {
+    fn parse_bulk_string_sfx(protocol: &str) -> Result<(Self, usize), Error> {
         if let Some(len) = protocol.find("\r\n") {
             let size = Self::parse_usize(&protocol[..len])?;
             if let Some(data_len) = protocol[len + 2..].find("\r\n") {
                 let s = Self::parse_string(&protocol[len + 2..len + 2 + data_len])?;
                 if size != s.len() {
-                    Err(anyhow::anyhow!(
+                    Err(Error::E(format!(
                         "[new bulk string] unmatched string length in prototocl {:?}",
-                        protocol
-                    ))
+                        protocol,
+                    )))
                 } else {
                     Ok((
                         Protocol::BulkString(s.to_lowercase()),
@@ -86,20 +86,20 @@ impl Protocol {
                     ))
                 }
             } else {
-                Err(anyhow::anyhow!(
+                Err(Error::E(format!(
                     "[new bulk string] unsupported protocol: {:?}",
                     protocol
-                ))
+                )))
             }
         } else {
-            Err(anyhow::anyhow!(
+            Err(Error::E(format!(
                 "[new bulk string] unsupported protocol: {:?}",
                 protocol
-            ))
+            )))
         }
     }
 
-    fn parse_array_sfx(s: &str) -> Result<(Self, usize)> {
+    fn parse_array_sfx(s: &str) -> Result<(Self, usize), Error> {
         let mut offset = 0;
         match s.find("\r\n") {
             Some(x) => {
@@ -119,20 +119,23 @@ impl Protocol {
                 }
                 Ok((Protocol::Array(vec), offset))
             }
-            _ => Err(anyhow::anyhow!("[new array] unsupported protocol: {:?}", s)),
+            _ => Err(Error::E(format!(
+                "[new array] unsupported protocol: {:?}",
+                s
+            ))),
         }
     }
 
-    fn parse_usize(protocol: &str) -> Result<usize> {
+    fn parse_usize(protocol: &str) -> Result<usize, Error> {
         match protocol.len() {
-            0 => Err(anyhow::anyhow!("parse usize error: {:?}", protocol)),
-            _ => Ok(protocol.parse::<usize>()?),
+            0 => Err(Error::E(format!("parse usize error: {:?}", protocol))),
+            _ => Ok(protocol.parse::<usize>().ok_or("")?),
         }
     }
 
-    fn parse_string(protocol: &str) -> Result<String> {
+    fn parse_string(protocol: &str) -> Result<String, Error> {
         match protocol.len() {
-            0 => Err(anyhow::anyhow!("parse usize error: {:?}", protocol)),
+            0 => Err(Error::E(format!("parse usize error: {:?}", protocol))),
             _ => Ok(protocol.to_string()),
         }
     }
