@@ -1,5 +1,4 @@
 use core::str;
-use std::fs;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::sync::Arc;

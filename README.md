@@ -1,7 +1,13 @@
 # Build Your Own Redis in Rust
 
-This project is to build a toy Redis-Server clone that's capable of handling
-basic commands like `PING`, `SET` and `GET`. Also implement the event loops, the Redis protocol and more.
+This project is to build a toy Redis-Server clone that's capable of parsing Redis protocol and handling basic Redis commands, parsing and initializing Redis from RDB file,
+supporting leader-follower replication.
+
+## Main features
++ Parse Redis protocol
++ Handle basic Redis commands
++ Parse and initialize Redis from RDB file
++ Leader-follower Replication
 
 ## Prerequisites
 install `redis-cli` first (an implementation of redis client for test purpose)
@@ -22,7 +28,7 @@ cargo run -- --dir /tmp/redis-files --dbfilename dump.rdb
 redis-cli PING
 redis-cli ECHO hey
 redis-cli SET foo bar
-redis-cli SET foo bar px 100
+redis-cli SET foo bar px/ex 100
 redis-cli GET foo
 redis-cli CONFIG GET dbfilename
 redis-cli KEYS "*"
@@ -153,3 +159,7 @@ C2 87 D6 12 00
 /* The 0xC3 size indicates that the string is compressed with the LZF algorithm.  You will not encounter LZF-compressed strings in this challenge. */
 C3 ...
 ```
+
+## Replication
+Redis server [leader-follower replication](https://redis.io/docs/management/replication/).
+Run multiple Redis servers with one acting as the "master" and the others as "replicas". Changes made to the master will be automatically replicated to replicas.

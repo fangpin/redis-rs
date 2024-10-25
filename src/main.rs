@@ -16,6 +16,10 @@ struct Args {
     /// The name of the Redis DB file
     #[arg(long)]
     dbfilename: String,
+
+    /// The port of the Redis server, default is 6379 if not specified
+    #[arg(long)]
+    port: Option<u16>,
 }
 
 #[tokio::main]
@@ -28,7 +32,12 @@ async fn main() {
         place_holder: String::new(),
     };
 
-    let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();
+    let port = args.port.unwrap_or(6379);
+    println!("will listen on port: {}", port);
+
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
+        .await
+        .unwrap();
     let server = server::Server::new(option);
 
     loop {
