@@ -3,7 +3,6 @@
 use redis_rs::server;
 
 use clap::Parser;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 /// Simple program to greet a person
@@ -25,6 +24,8 @@ async fn main() {
     let option = redis_rs::options::DBOption {
         dir: args.dir,
         db_file_name: args.dbfilename,
+        redis_version: String::new(),
+        place_holder: String::new(),
     };
 
     let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();

@@ -3,46 +3,50 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::Mutex;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 
 use crate::cmd::Cmd;
+use crate::error::DBError;
 use crate::options;
 use crate::rdb;
 use crate::storage::Storage;
 
 #[derive(Clone)]
 pub struct Server {
-    pub storage: Arc<RwLock<Storage>>,
+    pub storage: Arc<Mutex<Storage>>,
     pub option: options::DBOption,
 }
 
 impl Server {
     pub fn new(option: options::DBOption) -> Self {
         let mut server = Server {
-            storage: Arc::new(RwLock::new(Storage::new())),
+            storage: Arc::new(Mutex::new(Storage::new())),
             option: option,
         };
 
-        server.init();
+        server.init().unwrap();
         server
     }
 
-    pub fn init(self: &mut Self) {
+    pub fn init(self: &mut Self) -> Result<(), DBError> {
         let db_file_path =
             PathBuf::from(self.option.dir.clone()).join(self.option.db_file_name.clone());
+        println!("will open db file path: {}", db_file_path.display());
 
         // create empty db file if not exits
         let file = OpenOptions::new()
             .read(true)
+            .write(true)
             .create(true)
-            .open(db_file_path.clone())
-            .unwrap();
+            .open(db_file_path.clone())?;
 
-        if fs::metadata(db_file_path).unwrap().len() != 0 {
-            rdb::parse_db(&file, self).unwrap();
+        if file.metadata()?.len() != 0 {
+            rdb::parse_rdb_file(&file, self).unwrap();
         }
+
+        Ok(())
     }
 
     pub async fn handle(self: &mut Self, mut stream: tokio::net::TcpStream) {

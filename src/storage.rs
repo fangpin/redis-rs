@@ -1,10 +1,20 @@
-use std::{collections::HashMap, time::Instant};
+use std::{
+    collections::HashMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-pub type ValueType = (String, Option<(Instant, u128)>);
+pub type ValueType = (String, Option<u128>);
 
 pub struct Storage {
     // key -> (value, (insert/update time, expire milli seconds))
     set: HashMap<String, ValueType>,
+}
+
+#[inline]
+pub fn now_in_millis() -> u128 {
+    let start = SystemTime::now();
+    let duration_since_epoch = start.duration_since(UNIX_EPOCH).unwrap();
+    duration_since_epoch.as_millis()
 }
 
 impl Storage {
@@ -14,11 +24,12 @@ impl Storage {
         }
     }
 
-    pub fn get(self: &Self, k: &str) -> Option<String> {
+    pub fn get(self: &mut Self, k: &str) -> Option<String> {
         match self.set.get(k) {
-            Some((ss, time_info)) => match time_info {
-                Some((instant, ms)) => {
-                    if instant.elapsed().as_millis() > *ms {
+            Some((ss, expire_timestamp)) => match expire_timestamp {
+                Some(expire_time_stamp) => {
+                    if now_in_millis() > *expire_time_stamp {
+                        self.set.remove(k);
                         None
                     } else {
                         Some(ss.clone())
@@ -35,7 +46,7 @@ impl Storage {
     }
 
     pub fn setx(self: &mut Self, k: String, v: String, expire_ms: u128) {
-        self.set.insert(k, (v, Some((Instant::now(), expire_ms))));
+        self.set.insert(k, (v, Some(expire_ms + now_in_millis())));
     }
 
     pub fn keys(self: &Self) -> Vec<String> {

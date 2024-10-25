@@ -1,4 +1,4 @@
-use crate::error::Error;
+use crate::error::DBError;
 
 #[derive(Debug)]
 pub enum Protocol {
@@ -9,12 +9,12 @@ pub enum Protocol {
 }
 
 impl Protocol {
-    pub fn from(protocol: &str) -> Result<(Self, usize), Error> {
+    pub fn from(protocol: &str) -> Result<(Self, usize), DBError> {
         let ret = match protocol.chars().nth(0) {
             Some('+') => Self::parse_simple_string_sfx(&protocol[1..]),
             Some('$') => Self::parse_bulk_string_sfx(&protocol[1..]),
             Some('*') => Self::parse_array_sfx(&protocol[1..]),
-            _ => Err(Error::E(format!(
+            _ => Err(DBError(format!(
                 "[from] unsupported protocol: {:?}",
                 protocol
             ))),
@@ -59,23 +59,23 @@ impl Protocol {
         }
     }
 
-    fn parse_simple_string_sfx(protocol: &str) -> Result<(Self, usize), Error> {
+    fn parse_simple_string_sfx(protocol: &str) -> Result<(Self, usize), DBError> {
         match protocol.find("\r\n") {
             Some(x) => Ok((Self::SimpleString(protocol[..x].to_string()), x + 2)),
-            _ => Err(Error::E(format!(
+            _ => Err(DBError(format!(
                 "[new simple string] unsupported protocol: {:?}",
                 protocol
             ))),
         }
     }
 
-    fn parse_bulk_string_sfx(protocol: &str) -> Result<(Self, usize), Error> {
+    fn parse_bulk_string_sfx(protocol: &str) -> Result<(Self, usize), DBError> {
         if let Some(len) = protocol.find("\r\n") {
             let size = Self::parse_usize(&protocol[..len])?;
             if let Some(data_len) = protocol[len + 2..].find("\r\n") {
                 let s = Self::parse_string(&protocol[len + 2..len + 2 + data_len])?;
                 if size != s.len() {
-                    Err(Error::E(format!(
+                    Err(DBError(format!(
                         "[new bulk string] unmatched string length in prototocl {:?}",
                         protocol,
                     )))
@@ -86,20 +86,20 @@ impl Protocol {
                     ))
                 }
             } else {
-                Err(Error::E(format!(
+                Err(DBError(format!(
                     "[new bulk string] unsupported protocol: {:?}",
                     protocol
                 )))
             }
         } else {
-            Err(Error::E(format!(
+            Err(DBError(format!(
                 "[new bulk string] unsupported protocol: {:?}",
                 protocol
             )))
         }
     }
 
-    fn parse_array_sfx(s: &str) -> Result<(Self, usize), Error> {
+    fn parse_array_sfx(s: &str) -> Result<(Self, usize), DBError> {
         let mut offset = 0;
         match s.find("\r\n") {
             Some(x) => {
@@ -119,23 +119,25 @@ impl Protocol {
                 }
                 Ok((Protocol::Array(vec), offset))
             }
-            _ => Err(Error::E(format!(
+            _ => Err(DBError(format!(
                 "[new array] unsupported protocol: {:?}",
                 s
             ))),
         }
     }
 
-    fn parse_usize(protocol: &str) -> Result<usize, Error> {
+    fn parse_usize(protocol: &str) -> Result<usize, DBError> {
         match protocol.len() {
-            0 => Err(Error::E(format!("parse usize error: {:?}", protocol))),
-            _ => Ok(protocol.parse::<usize>().ok_or("")?),
+            0 => Err(DBError(format!("parse usize error: {:?}", protocol))),
+            _ => Ok(protocol
+                .parse::<usize>()
+                .map_err(|_| DBError(format!("parse usize error: {}", protocol)))?),
         }
     }
 
-    fn parse_string(protocol: &str) -> Result<String, Error> {
+    fn parse_string(protocol: &str) -> Result<String, DBError> {
         match protocol.len() {
-            0 => Err(Error::E(format!("parse usize error: {:?}", protocol))),
+            0 => Err(DBError(format!("parse usize error: {:?}", protocol))),
             _ => Ok(protocol.to_string()),
         }
     }
