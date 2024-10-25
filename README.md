@@ -15,11 +15,17 @@ install `redis-cli` first (an implementation of redis client for test purpose)
 cargo install mini-redis
 ```
 
-Know about [Redis protocoal](https://redis.io/docs/latest/develop/reference/protocol-spec)
+Learn about:
+- [Redis protocoal](https://redis.io/docs/latest/develop/reference/protocol-spec)
+- [RDB file format](https://rdb.fnordig.de/file_format.html)
+- [Redis replication](https://redis.io/docs/management/replication/)
 
 ## Start the Redis-rs server
 ```sh
+# start as master
 cargo run -- --dir /tmp/redis-files --dbfilename dump.rdb
+# start as slave
+cargo run -- --dir /Users/bytedance/repos/rust/redis-rs --dbfilename dump.rdb --port 6380 --replicaof "localhost 6379"
 ```
 
 
@@ -32,6 +38,7 @@ redis-cli SET foo bar px/ex 100
 redis-cli GET foo
 redis-cli CONFIG GET dbfilename
 redis-cli KEYS "*"
+redis-cli INFO replication
 ```
 
 ## RDB Persistence

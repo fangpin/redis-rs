@@ -9,6 +9,7 @@ pub enum Cmd {
     SetEx(String, String, u128),
     Keys,
     ConfigGet(String),
+    Info(Option<String>),
 }
 
 impl Cmd {
@@ -46,6 +47,14 @@ impl Cmd {
                         } else {
                             Cmd::Keys
                         }
+                    }
+                    "info" => {
+                        let section = if cmd.len() == 2 {
+                            Some(cmd[1].clone())
+                        } else {
+                            None
+                        };
+                        Cmd::Info(section)
                     }
                     _ => return Err(DBError(format!("unknown cmd {:?}", cmd[0]))),
                 })
@@ -107,6 +116,18 @@ impl Cmd {
                     keys.into_iter().map(|x| Protocol::BulkString(x)).collect(),
                 ))
             }
+            Cmd::Info(section) => match section {
+                Some(s) => match s.as_str() {
+                    "replication" => Ok(Protocol::BulkString(format!(
+                        "role:{}\nmaster_replid:{}\nmaster_repl_offset:{}\n",
+                        server.option.replication.role,
+                        server.option.replication.master_replid,
+                        server.option.replication.master_repl_offset
+                    ))),
+                    _ => Err(DBError(format!("unsupported section {:?}", s))),
+                },
+                None => Ok(Protocol::BulkString(format!("default"))),
+            },
         }
     }
 }

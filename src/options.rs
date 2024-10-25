@@ -2,6 +2,12 @@
 pub struct DBOption {
     pub dir: String,
     pub db_file_name: String,
-    pub redis_version: String,
-    pub place_holder: String,
+    pub replication: ReplicationOption,
+}
+
+#[derive(Clone)]
+pub struct ReplicationOption {
+    pub role: String,
+    pub master_replid: String,
+    pub master_repl_offset: u64,
 }
