@@ -25,6 +25,14 @@ impl Protocol {
         }
     }
 
+    pub fn form_vec(array: Vec<&str>) -> Self {
+        let array = array
+            .into_iter()
+            .map(|x| Protocol::BulkString(x.to_string()))
+            .collect();
+        Protocol::Array(array)
+    }
+
     #[inline]
     pub fn ok() -> Self {
         Protocol::SimpleString("ok".to_string())
@@ -41,6 +49,10 @@ impl Protocol {
                 .collect::<Vec<_>>()
                 .join(" "),
         }
+    }
+
+    pub fn to_string(self: &Self) -> String {
+        self.decode()
     }
 
     pub fn encode(self: &Self) -> String {

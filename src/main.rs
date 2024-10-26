@@ -29,26 +29,29 @@ struct Args {
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
+
+    let port = args.port.unwrap_or(6379);
+    println!("will listen on port: {}", port);
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
+        .await
+        .unwrap();
+
     let option = redis_rs::options::DBOption {
         dir: args.dir,
         db_file_name: args.dbfilename,
+        port: port,
         replication: ReplicationOption {
             role: if let Some(_) = args.replicaof {
                 "slave".to_string()
             } else {
                 "master".to_string()
             },
-            master_replid: "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeea".to_string(), // hard code for now
+            master_replid: "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeea".to_string(), // should be a random string but hard code for now
             master_repl_offset: 0,
+            replica_of: args.replicaof,
         },
     };
 
-    let port = args.port.unwrap_or(6379);
-    println!("will listen on port: {}", port);
-
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
-        .await
-        .unwrap();
     let server = server::Server::new(option);
 
     loop {

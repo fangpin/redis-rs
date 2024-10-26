@@ -23,9 +23,9 @@ Learn about:
 ## Start the Redis-rs server
 ```sh
 # start as master
-cargo run -- --dir /tmp/redis-files --dbfilename dump.rdb
+cargo run -- --dir /some/db/path --dbfilename dump.rdb
 # start as slave
-cargo run -- --dir /Users/bytedance/repos/rust/redis-rs --dbfilename dump.rdb --port 6380 --replicaof "localhost 6379"
+cargo run -- --dir /some/db/path --dbfilename dump.rdb --port 6380 --replicaof "localhost 6379"
 ```
 
 
@@ -170,3 +170,15 @@ C3 ...
 ## Replication
 Redis server [leader-follower replication](https://redis.io/docs/management/replication/).
 Run multiple Redis servers with one acting as the "master" and the others as "replicas". Changes made to the master will be automatically replicated to replicas.
+
+### Send Handshake (follower -> master)
+1. When the follower starts, it will send a PING command to the master as RESP Array.
+2. Then 2 REPLCONF (replication config) commands are sent to master from follower to communicate the port and the sync protocol. One is *REPLCONF listening-port <PORT>* and the other is *REPLCONF capa psync2*. psnync2 is an example sync protocol supported in this project.
+3. The follower sends the *PSYNC* command to master with replication id and offset to start the replication process.
+
+### Receive Handshake (master -> follower)
+1. Response a PONG message to follower.
+2. Response an OK message to follower for both REPLCONF commands.
+3. Response a *+FULLRESYNC <REPL_ID> 0\r\n* to follower with the replication id and offset.
+
+### Empty RDB file transfer

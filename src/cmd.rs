@@ -1,3 +1,5 @@
+use std::fmt::format;
+
 use crate::{error::DBError, protocol::Protocol, server::Server};
 
 pub enum Cmd {
@@ -10,6 +12,8 @@ pub enum Cmd {
     Keys,
     ConfigGet(String),
     Info(Option<String>),
+    Replconf(String, String),
+    Psync(String, String),
 }
 
 impl Cmd {
@@ -55,6 +59,18 @@ impl Cmd {
                             None
                         };
                         Cmd::Info(section)
+                    }
+                    "replconf" => {
+                        if cmd.len() < 3 {
+                            return Err(DBError(format!("unsupported cmd {:?}", cmd)));
+                        }
+                        Cmd::Replconf(cmd[1].clone(), cmd[2].clone())
+                    }
+                    "psync" => {
+                        if cmd.len() != 3 {
+                            return Err(DBError(format!("unsupported cmd {:?}", cmd)));
+                        }
+                        Cmd::Psync(cmd[1].clone(), cmd[2].clone())
                     }
                     _ => return Err(DBError(format!("unknown cmd {:?}", cmd[0]))),
                 })
@@ -128,6 +144,11 @@ impl Cmd {
                 },
                 None => Ok(Protocol::BulkString(format!("default"))),
             },
+            Cmd::Replconf(_, _) => Ok(Protocol::SimpleString("OK".to_string())), // todo: support more
+            Cmd::Psync(_, _) => Ok(Protocol::SimpleString(format!(
+                "FULLRESYNC {} 0",
+                server.option.replication.master_replid
+            ))),
         }
     }
 }
