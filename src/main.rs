@@ -52,7 +52,7 @@ async fn main() {
         },
     };
 
-    let server = server::Server::new(option);
+    let server = server::Server::new(option).await;
 
     loop {
         let stream = listener.accept().await;
@@ -62,7 +62,9 @@ async fn main() {
 
                 let mut sc = server.clone();
                 tokio::spawn(async move {
-                    sc.handle(stream).await;
+                    if let Err(e) = sc.handle(stream).await {
+                        println!("error: {:?}, will close the connection. Bye", e);
+                    }
                 });
             }
             Err(e) => {

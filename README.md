@@ -182,3 +182,8 @@ Run multiple Redis servers with one acting as the "master" and the others as "re
 3. Response a *+FULLRESYNC <REPL_ID> 0\r\n* to follower with the replication id and offset.
 
 ### Empty RDB file transfer
+When the follower starts, it sends a *PSYNC ? -1* command to tell master that it doesn't have any data yet, and needs a full resync.
+
+Then the master send a *FULLRESYNC* response to the follower as an acknowledgement.
+
+Finally, the master send the RDB file to represent its current state to the follower. The follower should load the RDB file received to the memory, replacing its current state.

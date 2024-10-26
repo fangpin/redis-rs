@@ -10,18 +10,20 @@ use crate::cmd::Cmd;
 use crate::error::DBError;
 use crate::options;
 use crate::rdb;
-use crate::replication_client::ReplicationClient;
+use crate::replication_client::FollowerReplicationClient;
+use crate::replication_client::MasterReplicationClient;
 use crate::storage::Storage;
 
 #[derive(Clone)]
 pub struct Server {
     pub storage: Arc<Mutex<Storage>>,
     pub option: options::DBOption,
-    repl_client: ReplicationClient,
+    follower_repl_client: FollowerReplicationClient,
+    master_repl_client: MasterReplicationClient,
 }
 
 impl Server {
-    pub fn new(option: options::DBOption) -> Self {
+    pub async fn new(option: options::DBOption) -> Self {
         let master_addr = match option.replication.role.as_str() {
             "slave" => Some(
                 option
@@ -37,21 +39,24 @@ impl Server {
         let mut server = Server {
             storage: Arc::new(Mutex::new(Storage::new())),
             option: option,
-            repl_client: ReplicationClient::new(master_addr),
+            follower_repl_client: FollowerReplicationClient::new(master_addr).await,
+            master_repl_client: MasterReplicationClient::new(),
         };
 
-        server.init().unwrap();
+        server.init().await.unwrap();
         server
     }
 
-    pub fn init(self: &mut Self) -> Result<(), DBError> {
+    pub async fn init(self: &mut Self) -> Result<(), DBError> {
         if self.option.replication.role == "slave" {
             // follower initialization
             println!("Start as follower");
-            self.repl_client.ping_master()?;
-            self.repl_client.report_port(self.option.port)?;
-            self.repl_client.report_sync_protocol()?;
-            self.repl_client.communicate_offset()?;
+            self.follower_repl_client.ping_master().await?;
+            self.follower_repl_client
+                .report_port(self.option.port)
+                .await?;
+            self.follower_repl_client.report_sync_protocol().await?;
+            self.follower_repl_client.start_psync().await?;
         } else {
             // master initialization
             println!("Start as master");
@@ -74,24 +79,33 @@ impl Server {
         Ok(())
     }
 
-    pub async fn handle(self: &mut Self, mut stream: tokio::net::TcpStream) {
+    pub async fn handle(self: &mut Self, mut stream: tokio::net::TcpStream) -> Result<(), DBError> {
         let mut buf = [0; 512];
         loop {
             if let Ok(len) = stream.read(&mut buf).await {
                 if len == 0 {
                     println!("[handle] connection closed");
-                    return;
+                    return Ok(());
                 }
-                let s = str::from_utf8(&buf[..len]).unwrap();
-                let cmd = Cmd::from(s).unwrap();
-                let res = cmd.run(self).unwrap();
+                let s = str::from_utf8(&buf[..len])?;
+                let cmd = Cmd::from(s)?;
+                let res = cmd.run(self)?;
                 println!("going to send response {}", res.encode());
-                stream.write_all(res.encode().as_bytes()).await.unwrap();
+                stream.write(res.encode().as_bytes()).await?;
+
+                // send a full RDB file to slave
+                match cmd {
+                    Cmd::Psync(_, _) => {
+                        self.master_repl_client.send_rdb_file(&mut stream).await?;
+                    }
+                    _ => {} // do nothing for other commands
+                }
                 println!("finish processing");
             } else {
                 println!("[handle] going to break");
                 break;
             }
         }
+        Ok(())
     }
 }

@@ -14,3 +14,15 @@ impl From<ParseIntError> for DBError {
         DBError(item.to_string().clone())
     }
 }
+
+impl From<std::str::Utf8Error> for DBError {
+    fn from(item: std::str::Utf8Error) -> Self {
+        DBError(item.to_string().clone())
+    }
+}
+
+impl From<std::string::FromUtf8Error> for DBError {
+    fn from(item: std::string::FromUtf8Error) -> Self {
+        DBError(item.to_string().clone())
+    }
+}

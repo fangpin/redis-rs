@@ -1,5 +1,3 @@
-use std::fmt::format;
-
 use crate::{error::DBError, protocol::Protocol, server::Server};
 
 pub enum Cmd {
