@@ -49,6 +49,10 @@ impl Storage {
         self.set.insert(k, (v, Some(expire_ms + now_in_millis())));
     }
 
+    pub fn del(self: &mut Self, k: String) {
+        self.set.remove(&k);
+    }
+
     pub fn keys(self: &Self) -> Vec<String> {
         self.set.keys().map(|x| x.clone()).collect()
     }

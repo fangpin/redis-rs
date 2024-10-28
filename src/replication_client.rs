@@ -1,11 +1,9 @@
-use std::{
-    num::ParseIntError,
-    sync::{Arc, Mutex},
-};
+use std::{num::ParseIntError, sync::Arc};
 
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::TcpStream,
+    sync::{mpsc, Mutex},
 };
 
 use crate::{error::DBError, protocol::Protocol};
@@ -38,7 +36,7 @@ impl FollowerReplicationClient {
         let protocol = Protocol::Array(vec![Protocol::BulkString("PING".to_string())]);
         self.stream
             .lock()
-            .unwrap()
+            .await
             .as_mut()
             .unwrap()
             .write_all(protocol.encode().as_bytes())
@@ -55,7 +53,7 @@ impl FollowerReplicationClient {
         ]);
         self.stream
             .lock()
-            .unwrap()
+            .await
             .as_mut()
             .unwrap()
             .write_all(protocol.encode().as_bytes())
@@ -68,7 +66,7 @@ impl FollowerReplicationClient {
         let p = Protocol::form_vec(vec!["REPLCONF", "capa", "psync2"]);
         self.stream
             .lock()
-            .unwrap()
+            .await
             .as_mut()
             .unwrap()
             .write_all(p.encode().as_bytes())
@@ -80,7 +78,7 @@ impl FollowerReplicationClient {
         let p = Protocol::form_vec(vec!["PSYNC", "?", "-1"]);
         self.stream
             .lock()
-            .unwrap()
+            .await
             .as_mut()
             .unwrap()
             .write_all(p.encode().as_bytes())
@@ -90,7 +88,7 @@ impl FollowerReplicationClient {
     }
 
     pub async fn recv_rdb_file(self: &mut Self) -> Result<(), DBError> {
-        let mut stream = self.stream.lock().unwrap();
+        let mut stream = self.stream.lock().await;
         let stream = stream.as_mut().unwrap();
         let mut reader = BufReader::new(stream);
 
@@ -133,7 +131,7 @@ impl FollowerReplicationClient {
         let n_bytes = self
             .stream
             .lock()
-            .unwrap()
+            .await
             .as_mut()
             .unwrap()
             .read(&mut buf)
@@ -175,6 +173,32 @@ impl MasterReplicationClient {
             .await?;
         stream.write_all("\r\n".as_bytes()).await?;
         stream.write_all(&empty_rdb_file_bytes).await?;
+        Ok(())
+    }
+
+    pub async fn store_command(
+        self: &mut Self,
+        replication_sender: mpsc::Sender<(Protocol, u64)>,
+        protocol: Protocol,
+        offset: u64,
+    ) -> Result<(), DBError> {
+        replication_sender.send((protocol, offset)).await?;
+        Ok(())
+    }
+
+    pub async fn send_commands(
+        self: &mut Self,
+        replication_receiver: Arc<Mutex<mpsc::Receiver<(Protocol, u64)>>>,
+        stream: &mut TcpStream,
+    ) -> Result<(), DBError> {
+        let mut receiver = replication_receiver.lock().await;
+        while let Some((protocol, offset)) = receiver.recv().await {
+            println!(
+                "going to send command {:?} with offset {}",
+                protocol, offset
+            );
+            stream.write_all(protocol.encode().as_bytes()).await?;
+        }
         Ok(())
     }
 }

@@ -1,14 +1,17 @@
 use core::str;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use std::sync::Mutex;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::mpsc;
+use tokio::sync::Mutex;
 
 use crate::cmd::Cmd;
 use crate::error::DBError;
 use crate::options;
+use crate::protocol::Protocol;
 use crate::rdb;
 use crate::replication_client::FollowerReplicationClient;
 use crate::replication_client::MasterReplicationClient;
@@ -18,8 +21,9 @@ use crate::storage::Storage;
 pub struct Server {
     pub storage: Arc<Mutex<Storage>>,
     pub option: options::DBOption,
+    pub offset: Arc<AtomicU64>,
+    pub master_repl_client: MasterReplicationClient,
     follower_repl_client: FollowerReplicationClient,
-    master_repl_client: MasterReplicationClient,
 }
 
 impl Server {
@@ -41,6 +45,7 @@ impl Server {
             option: option,
             follower_repl_client: FollowerReplicationClient::new(master_addr).await,
             master_repl_client: MasterReplicationClient::new(),
+            offset: Arc::new(AtomicU64::new(0)),
         };
 
         server.init().await.unwrap();
@@ -72,14 +77,19 @@ impl Server {
                 .open(db_file_path.clone())?;
 
             if file.metadata()?.len() != 0 {
-                rdb::parse_rdb_file(&file, self)?;
+                rdb::parse_rdb_file(&file, self).await?;
             }
         }
 
         Ok(())
     }
 
-    pub async fn handle(self: &mut Self, mut stream: tokio::net::TcpStream) -> Result<(), DBError> {
+    pub async fn handle(
+        self: &mut Self,
+        mut stream: tokio::net::TcpStream,
+        replication_sender: mpsc::Sender<(Protocol, u64)>,
+        replication_receiver: Arc<Mutex<mpsc::Receiver<(Protocol, u64)>>>,
+    ) -> Result<(), DBError> {
         let mut buf = [0; 512];
         loop {
             if let Ok(len) = stream.read(&mut buf).await {
@@ -88,8 +98,8 @@ impl Server {
                     return Ok(());
                 }
                 let s = str::from_utf8(&buf[..len])?;
-                let cmd = Cmd::from(s)?;
-                let res = cmd.run(self)?;
+                let (cmd, protocol) = Cmd::from(s)?;
+                let res = cmd.run(self, protocol, replication_sender.clone()).await?;
                 println!("going to send response {}", res.encode());
                 stream.write(res.encode().as_bytes()).await?;
 
@@ -97,6 +107,10 @@ impl Server {
                 match cmd {
                     Cmd::Psync(_, _) => {
                         self.master_repl_client.send_rdb_file(&mut stream).await?;
+
+                        self.master_repl_client
+                            .send_commands(replication_receiver.clone(), &mut stream)
+                            .await?;
                     }
                     _ => {} // do nothing for other commands
                 }

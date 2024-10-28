@@ -24,9 +24,9 @@ const DB_SELECT: u8 = 0xFE;
 const TABLE_SIZE_INFO: u8 = 0xFB;
 const EOF: u8 = 0xFF;
 
-pub fn parse_rdb_file(f: &fs::File, server: &mut Server) -> Result<(), DBError> {
+pub async fn parse_rdb_file(f: &fs::File, server: &mut Server) -> Result<(), DBError> {
     let mut reader = BufReader::new(f);
-    let mut storage = server.storage.lock().unwrap();
+    let mut storage = server.storage.lock().await;
     parse_magic(&mut reader)?;
     let _version = parse_version(&mut reader)?;
     loop {

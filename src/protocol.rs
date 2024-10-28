@@ -1,6 +1,6 @@
 use crate::error::DBError;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Protocol {
     SimpleString(String),
     BulkString(String),

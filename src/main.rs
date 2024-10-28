@@ -1,9 +1,14 @@
 // #![allow(unused_imports)]
 
+use std::sync::Arc;
+use tokio::{
+    net::TcpListener,
+    sync::{mpsc, Mutex},
+};
+
 use redis_rs::{options::ReplicationOption, server};
 
 use clap::Parser;
-use tokio::net::TcpListener;
 
 /// Simple program to greet a person
 #[derive(Parser, Debug)]
@@ -52,7 +57,10 @@ async fn main() {
         },
     };
 
+    let (tx, rx) = mpsc::channel(4096);
     let server = server::Server::new(option).await;
+
+    let rx = Arc::new(Mutex::new(rx));
 
     loop {
         let stream = listener.accept().await;
@@ -61,8 +69,13 @@ async fn main() {
                 println!("accepted new connection");
 
                 let mut sc = server.clone();
+                let replication_sender = tx.clone();
+                let replication_receiver = rx.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = sc.handle(stream).await {
+                    if let Err(e) = sc
+                        .handle(stream, replication_sender, replication_receiver)
+                        .await
+                    {
                         println!("error: {:?}, will close the connection. Bye", e);
                     }
                 });

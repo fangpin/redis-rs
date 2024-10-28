@@ -181,9 +181,14 @@ Run multiple Redis servers with one acting as the "master" and the others as "re
 2. Response an OK message to follower for both REPLCONF commands.
 3. Response a *+FULLRESYNC <REPL_ID> 0\r\n* to follower with the replication id and offset.
 
-### Empty RDB file transfer
+### RDB file transfer
 When the follower starts, it sends a *PSYNC ? -1* command to tell master that it doesn't have any data yet, and needs a full resync.
 
 Then the master send a *FULLRESYNC* response to the follower as an acknowledgement.
 
 Finally, the master send the RDB file to represent its current state to the follower. The follower should load the RDB file received to the memory, replacing its current state.
+
+### Receive write commands (master -> follower)
+The master sends following write commands to the follower with the offset info.
+The sending is to reuse the same TCP connection of handshake and RDB file transfer.
+As the all the commands are encoded as RESP Array just like a normal client command, so the follower could reuse the same logic to handler the replicate commands from master. The only difference is the commands are coming from the master and no need response back.
