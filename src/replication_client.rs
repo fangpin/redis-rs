@@ -6,14 +6,14 @@ use tokio::{
     sync::{mpsc, Mutex},
 };
 
-use crate::{error::DBError, protocol::Protocol};
+use crate::{error::DBError, protocol::Protocol, rdb, replication_channel};
 
 const EMPTY_RDB_FILE_HEX_STRING: &str = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
 
 #[derive(Clone)]
 pub struct FollowerReplicationClient {
     master_addr: Option<String>,
-    stream: Arc<Mutex<Option<TcpStream>>>,
+    pub stream: Arc<Mutex<Option<TcpStream>>>,
 }
 
 impl FollowerReplicationClient {
@@ -113,16 +113,13 @@ impl FollowerReplicationClient {
             replication_info[0], replication_info[1], replication_info[2]
         );
 
-        println!("going to recv rdb file");
-        loop {
-            let mut buf = vec![0u8; 4096];
-            let n_bytes = reader.read(&mut buf).await?;
-            if n_bytes == 0 {
-                println!("Get rdb file end");
-                break;
-            }
-            println!("recv rdb file: {:?}", &buf[..n_bytes]);
-        }
+        // receive rdb file content
+        let mut rdb_content = Vec::new();
+        reader.read_until(rdb::EOF, &mut rdb_content).await?;
+        let mut crc_buf = [0; 8];
+        let _crc = reader.read_exact(&mut crc_buf).await?;
+        rdb_content.extend_from_slice(&crc_buf);
+        println!("recv rdb file: {:?}", &rdb_content);
         Ok(())
     }
 
@@ -178,23 +175,25 @@ impl MasterReplicationClient {
 
     pub async fn store_command(
         self: &mut Self,
-        replication_sender: mpsc::Sender<(Protocol, u64)>,
         protocol: Protocol,
         offset: u64,
     ) -> Result<(), DBError> {
-        replication_sender.send((protocol, offset)).await?;
+        println!(
+            "store replication command: {:?}, offset: {}",
+            protocol, offset
+        );
+        replication_channel::sender()
+            .unwrap()
+            .send((protocol, offset))
+            .await?;
         Ok(())
     }
 
-    pub async fn send_commands(
-        self: &mut Self,
-        replication_receiver: Arc<Mutex<mpsc::Receiver<(Protocol, u64)>>>,
-        stream: &mut TcpStream,
-    ) -> Result<(), DBError> {
-        let mut receiver = replication_receiver.lock().await;
+    pub async fn send_commands(self: &mut Self, stream: &mut TcpStream) -> Result<(), DBError> {
+        let mut receiver = replication_channel::receiver().await.unwrap();
         while let Some((protocol, offset)) = receiver.recv().await {
             println!(
-                "going to send command {:?} with offset {}",
+                "going to send replication command {:?} with offset {}",
                 protocol, offset
             );
             stream.write_all(protocol.encode().as_bytes()).await?;

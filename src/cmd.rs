@@ -1,7 +1,6 @@
-use tokio::sync::mpsc;
-
 use crate::{error::DBError, protocol::Protocol, server::Server};
 
+#[derive(Debug)]
 pub enum Cmd {
     Ping,
     Echo(String),
@@ -96,7 +95,7 @@ impl Cmd {
         self: &Self,
         server: &mut Server,
         protocol: Protocol,
-        replication_sender: mpsc::Sender<(Protocol, u64)>,
+        allow_write_on_slave: bool,
     ) -> Result<Protocol, DBError> {
         match self {
             Cmd::Ping => Ok(Protocol::SimpleString("PONG".to_string())),
@@ -116,11 +115,19 @@ impl Cmd {
                         .offset
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 };
-                server
-                    .master_repl_client
-                    .store_command(replication_sender.clone(), protocol, offset)
-                    .await?;
-                Ok(Protocol::ok())
+                if server.is_master() {
+                    server
+                        .master_repl_client
+                        .as_mut()
+                        .unwrap()
+                        .store_command(protocol, offset)
+                        .await?;
+                    Ok(Protocol::ok())
+                } else if !allow_write_on_slave {
+                    Ok(Protocol::write_on_slave_err())
+                } else {
+                    Ok(Protocol::ok())
+                }
             }
             Cmd::SetPx(k, v, x) => {
                 let offset = {
@@ -130,11 +137,19 @@ impl Cmd {
                         .offset
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 };
-                server
-                    .master_repl_client
-                    .store_command(replication_sender.clone(), protocol, offset)
-                    .await?;
-                Ok(Protocol::ok())
+                if server.is_master() {
+                    server
+                        .master_repl_client
+                        .as_mut()
+                        .unwrap()
+                        .store_command(protocol, offset)
+                        .await?;
+                    Ok(Protocol::ok())
+                } else if !allow_write_on_slave {
+                    Ok(Protocol::write_on_slave_err())
+                } else {
+                    Ok(Protocol::ok())
+                }
             }
             Cmd::SetEx(k, v, x) => {
                 let offset = {
@@ -144,11 +159,19 @@ impl Cmd {
                         .offset
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 };
-                server
-                    .master_repl_client
-                    .store_command(replication_sender.clone(), protocol, offset)
-                    .await?;
-                Ok(Protocol::ok())
+                if server.is_master() {
+                    server
+                        .master_repl_client
+                        .as_mut()
+                        .unwrap()
+                        .store_command(protocol, offset)
+                        .await?;
+                    Ok(Protocol::ok())
+                } else if !allow_write_on_slave {
+                    Ok(Protocol::write_on_slave_err())
+                } else {
+                    Ok(Protocol::ok())
+                }
             }
             Cmd::Del(k) => {
                 let offset = {
@@ -158,11 +181,19 @@ impl Cmd {
                         .offset
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 };
-                server
-                    .master_repl_client
-                    .store_command(replication_sender.clone(), protocol, offset)
-                    .await?;
-                Ok(Protocol::ok())
+                if server.is_master() {
+                    server
+                        .master_repl_client
+                        .as_mut()
+                        .unwrap()
+                        .store_command(protocol, offset)
+                        .await?;
+                    Ok(Protocol::ok())
+                } else if !allow_write_on_slave {
+                    Ok(Protocol::write_on_slave_err())
+                } else {
+                    Ok(Protocol::ok())
+                }
             }
             Cmd::ConfigGet(name) => match name.as_str() {
                 "dir" => Ok(Protocol::Array(vec![

@@ -38,6 +38,16 @@ impl Protocol {
         Protocol::SimpleString("ok".to_string())
     }
 
+    #[inline]
+    pub fn err(msg: &str) -> Self {
+        Protocol::SimpleString(msg.to_string())
+    }
+
+    #[inline]
+    pub fn write_on_slave_err() -> Self {
+        Self::err("DISALLOW WRITE ON SLAVE")
+    }
+
     pub fn decode(self: &Self) -> String {
         match self {
             Protocol::SimpleString(s) => s.to_string(),

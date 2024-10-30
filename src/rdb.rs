@@ -22,7 +22,7 @@ const MAGIC: &[u8; 5] = b"REDIS";
 const META: u8 = 0xFA;
 const DB_SELECT: u8 = 0xFE;
 const TABLE_SIZE_INFO: u8 = 0xFB;
-const EOF: u8 = 0xFF;
+pub const EOF: u8 = 0xFF;
 
 pub async fn parse_rdb_file(f: &fs::File, server: &mut Server) -> Result<(), DBError> {
     let mut reader = BufReader::new(f);
