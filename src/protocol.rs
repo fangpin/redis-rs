@@ -48,6 +48,11 @@ impl Protocol {
         Self::err("DISALLOW WRITE ON SLAVE")
     }
 
+    #[inline]
+    pub fn psync_on_slave_err() -> Self {
+        Self::err("PSYNC ON SLAVE IS NOT ALLOWED")
+    }
+
     pub fn decode(self: &Self) -> String {
         match self {
             Protocol::SimpleString(s) => s.to_string(),

@@ -97,6 +97,7 @@ impl Cmd {
         protocol: Protocol,
         allow_write_on_slave: bool,
     ) -> Result<Protocol, DBError> {
+        // return if the command is a write command
         match self {
             Cmd::Ping => Ok(Protocol::SimpleString("PONG".to_string())),
             Cmd::Echo(s) => Ok(Protocol::SimpleString(s.clone())),
@@ -114,13 +115,16 @@ impl Cmd {
                     server
                         .offset
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        + 1
                 };
                 if server.is_master() {
                     server
-                        .master_repl_client
+                        .master_repl_clients
+                        .lock()
+                        .await
                         .as_mut()
                         .unwrap()
-                        .store_command(protocol, offset)
+                        .send_command(protocol)
                         .await?;
                     Ok(Protocol::ok())
                 } else if !allow_write_on_slave {
@@ -139,10 +143,12 @@ impl Cmd {
                 };
                 if server.is_master() {
                     server
-                        .master_repl_client
+                        .master_repl_clients
+                        .lock()
+                        .await
                         .as_mut()
                         .unwrap()
-                        .store_command(protocol, offset)
+                        .send_command(protocol)
                         .await?;
                     Ok(Protocol::ok())
                 } else if !allow_write_on_slave {
@@ -161,10 +167,12 @@ impl Cmd {
                 };
                 if server.is_master() {
                     server
-                        .master_repl_client
+                        .master_repl_clients
+                        .lock()
+                        .await
                         .as_mut()
                         .unwrap()
-                        .store_command(protocol, offset)
+                        .send_command(protocol)
                         .await?;
                     Ok(Protocol::ok())
                 } else if !allow_write_on_slave {
@@ -183,10 +191,12 @@ impl Cmd {
                 };
                 if server.is_master() {
                     server
-                        .master_repl_client
+                        .master_repl_clients
+                        .lock()
+                        .await
                         .as_mut()
                         .unwrap()
-                        .store_command(protocol, offset)
+                        .send_command(protocol)
                         .await?;
                     Ok(Protocol::ok())
                 } else if !allow_write_on_slave {
@@ -225,10 +235,16 @@ impl Cmd {
                 None => Ok(Protocol::BulkString(format!("default"))),
             },
             Cmd::Replconf(_, _) => Ok(Protocol::SimpleString("OK".to_string())), // todo: support more
-            Cmd::Psync(_, _) => Ok(Protocol::SimpleString(format!(
-                "FULLRESYNC {} 0",
-                server.option.replication.master_replid
-            ))),
+            Cmd::Psync(_, _) => {
+                if server.is_master() {
+                    Ok(Protocol::SimpleString(format!(
+                        "FULLRESYNC {} 0",
+                        server.option.replication.master_replid
+                    )))
+                } else {
+                    Ok(Protocol::psync_on_slave_err())
+                }
+            }
         }
     }
 }

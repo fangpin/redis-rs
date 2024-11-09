@@ -20,8 +20,8 @@ pub struct Server {
     pub storage: Arc<Mutex<Storage>>,
     pub option: options::DBOption,
     pub offset: Arc<AtomicU64>,
-    pub master_repl_client: Option<MasterReplicationClient>,
-    pub follower_repl_client: Option<FollowerReplicationClient>,
+    pub master_repl_clients: Arc<Mutex<Option<MasterReplicationClient>>>,
+    master_addr: Option<String>,
 }
 
 impl Server {
@@ -43,17 +43,13 @@ impl Server {
         let mut server = Server {
             storage: Arc::new(Mutex::new(Storage::new())),
             option: option,
-            follower_repl_client: if !is_master {
-                Some(FollowerReplicationClient::new(master_addr).await)
+            master_repl_clients: if is_master {
+                Arc::new(Mutex::new(Some(MasterReplicationClient::new())))
             } else {
-                None
-            },
-            master_repl_client: if is_master {
-                Some(MasterReplicationClient::new())
-            } else {
-                None
+                Arc::new(Mutex::new(None))
             },
             offset: Arc::new(AtomicU64::new(0)),
+            master_addr,
         };
 
         server.init().await.unwrap();
@@ -61,16 +57,8 @@ impl Server {
     }
 
     pub async fn init(self: &mut Self) -> Result<(), DBError> {
-        if self.option.replication.role == "slave" {
-            // follower initialization
-            println!("Start as follower\n");
-            let replication_client = self.follower_repl_client.as_mut().unwrap();
-            replication_client.ping_master().await?;
-            replication_client.report_port(self.option.port).await?;
-            replication_client.report_sync_protocol().await?;
-            replication_client.start_psync().await?;
-        } else {
-            // master initialization
+        // master initialization
+        if self.is_master() {
             println!("Start as master\n");
             let db_file_path =
                 PathBuf::from(self.option.dir.clone()).join(self.option.db_file_name.clone());
@@ -87,13 +75,20 @@ impl Server {
                 rdb::parse_rdb_file(&file, self).await?;
             }
         }
-
         Ok(())
+    }
+
+    pub async fn get_follower_repl_client(self: &mut Self) -> Option<FollowerReplicationClient> {
+        if self.is_slave() {
+            Some(FollowerReplicationClient::new(self.master_addr.clone().unwrap()).await)
+        } else {
+            None
+        }
     }
 
     pub async fn handle(
         self: &mut Self,
-        mut stream: &mut tokio::net::TcpStream,
+        mut stream: tokio::net::TcpStream,
         allow_write_on_slave: bool,
     ) -> Result<(), DBError> {
         let mut buf = [0; 512];
@@ -115,9 +110,11 @@ impl Server {
                 if self.is_master() {
                     match cmd {
                         Cmd::Psync(_, _) => {
-                            let replication_client = self.master_repl_client.as_mut().unwrap();
-                            replication_client.send_rdb_file(&mut stream).await?;
-                            replication_client.send_commands(&mut stream).await?;
+                            let mut master_rep_client = self.master_repl_clients.lock().await;
+                            let master_rep_client = master_rep_client.as_mut().unwrap();
+                            master_rep_client.send_rdb_file(&mut stream).await?;
+                            master_rep_client.add_stream(stream).await?;
+                            break;
                         }
                         _ => {} // do nothing for other commands
                     }

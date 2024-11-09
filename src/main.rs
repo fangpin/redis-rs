@@ -2,7 +2,7 @@
 
 use tokio::net::TcpListener;
 
-use redis_rs::{options::ReplicationOption, replication_channel, server};
+use redis_rs::{options::ReplicationOption, server};
 
 use clap::Parser;
 
@@ -56,28 +56,25 @@ async fn main() {
         },
     };
 
-    // init replication channel
-    replication_channel::init();
-
     // new server
-    let server = server::Server::new(option).await;
+    let mut server = server::Server::new(option).await;
 
     //start receive replication cmds for slave
     if server.is_slave() {
         let mut sc = server.clone();
+
+        let mut follower_repl_client = server.get_follower_repl_client().await.unwrap();
+        follower_repl_client.ping_master().await.unwrap();
+        follower_repl_client
+            .report_port(server.option.port)
+            .await
+            .unwrap();
+        follower_repl_client.report_sync_protocol().await.unwrap();
+        follower_repl_client.start_psync().await.unwrap();
+
         tokio::spawn(async move {
-            loop {
-                match sc.clone().follower_repl_client.as_ref() {
-                    Some(client) => {
-                        let mut stream = client.stream.lock().await;
-                        if let Some(mut stream) = stream.as_mut() {
-                            if let Err(e) = sc.handle(&mut stream, true).await {
-                                println!("error: {:?}, will close the connection. Bye", e);
-                            }
-                        }
-                    }
-                    None => println!("No replication client available"),
-                }
+            if let Err(e) = sc.handle(follower_repl_client.stream, true).await {
+                println!("error: {:?}, will close the connection. Bye", e);
             }
         });
     }
@@ -86,12 +83,12 @@ async fn main() {
     loop {
         let stream = listener.accept().await;
         match stream {
-            Ok((mut stream, _)) => {
+            Ok((stream, _)) => {
                 println!("accepted new connection");
 
                 let mut sc = server.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = sc.handle(&mut stream, false).await {
+                    if let Err(e) = sc.handle(stream, false).await {
                         println!("error: {:?}, will close the connection. Bye", e);
                     }
                 });
