@@ -14,6 +14,7 @@ pub enum Cmd {
     Del(String),
     Replconf(String, String),
     Psync(String, String),
+    Type(String),
 }
 
 impl Cmd {
@@ -78,6 +79,12 @@ impl Cmd {
                                 return Err(DBError(format!("unsupported cmd {:?}", cmd)));
                             }
                             Cmd::Del(cmd[1].clone())
+                        }
+                        "type" => {
+                            if cmd.len() != 2 {
+                                return Err(DBError(format!("unsupported cmd {:?}", cmd)));
+                            }
+                            Cmd::Type(cmd[1].clone())
                         }
                         _ => return Err(DBError(format!("unknown cmd {:?}", cmd[0]))),
                     },
@@ -256,6 +263,12 @@ impl Cmd {
                 } else {
                     Ok(Protocol::psync_on_slave_err())
                 }
+            }
+            Cmd::Type(k) => {
+                let v = { server.storage.lock().await.get(k) };
+                Ok(v.map_or(Protocol::none(), |_| {
+                    Protocol::SimpleString("string".to_string())
+                }))
             }
         };
         if ret.is_ok() {

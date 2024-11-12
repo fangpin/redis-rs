@@ -53,6 +53,11 @@ impl Protocol {
         Self::err("PSYNC ON SLAVE IS NOT ALLOWED")
     }
 
+    #[inline]
+    pub fn none() -> Self {
+        Self::SimpleString("none".to_string())
+    }
+
     pub fn decode(self: &Self) -> String {
         match self {
             Protocol::SimpleString(s) => s.to_string(),

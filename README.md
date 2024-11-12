@@ -39,6 +39,7 @@ redis-cli GET foo
 redis-cli CONFIG GET dbfilename
 redis-cli KEYS "*"
 redis-cli INFO replication
+redis-cli TYPE some_key
 ```
 
 ## RDB Persistence
@@ -192,3 +193,6 @@ Finally, the master send the RDB file to represent its current state to the foll
 The master sends following write commands to the follower with the offset info.
 The sending is to reuse the same TCP connection of handshake and RDB file transfer.
 As the all the commands are encoded as RESP Array just like a normal client command, so the follower could reuse the same logic to handler the replicate commands from master. The only difference is the commands are coming from the master and no need response back.
+
+
+## Streams
