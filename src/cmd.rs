@@ -95,10 +95,11 @@ impl Cmd {
         self: &Self,
         server: &mut Server,
         protocol: Protocol,
-        allow_write_on_slave: bool,
+        is_rep_con: bool,
     ) -> Result<Protocol, DBError> {
         // return if the command is a write command
-        match self {
+        let p = protocol.clone();
+        let ret = match self {
             Cmd::Ping => Ok(Protocol::SimpleString("PONG".to_string())),
             Cmd::Echo(s) => Ok(Protocol::SimpleString(s.clone())),
             Cmd::Get(k) => {
@@ -127,7 +128,7 @@ impl Cmd {
                         .send_command(protocol)
                         .await?;
                     Ok(Protocol::ok())
-                } else if !allow_write_on_slave {
+                } else if !is_rep_con {
                     Ok(Protocol::write_on_slave_err())
                 } else {
                     Ok(Protocol::ok())
@@ -151,7 +152,7 @@ impl Cmd {
                         .send_command(protocol)
                         .await?;
                     Ok(Protocol::ok())
-                } else if !allow_write_on_slave {
+                } else if !is_rep_con {
                     Ok(Protocol::write_on_slave_err())
                 } else {
                     Ok(Protocol::ok())
@@ -175,7 +176,7 @@ impl Cmd {
                         .send_command(protocol)
                         .await?;
                     Ok(Protocol::ok())
-                } else if !allow_write_on_slave {
+                } else if !is_rep_con {
                     Ok(Protocol::write_on_slave_err())
                 } else {
                     Ok(Protocol::ok())
@@ -199,7 +200,7 @@ impl Cmd {
                         .send_command(protocol)
                         .await?;
                     Ok(Protocol::ok())
-                } else if !allow_write_on_slave {
+                } else if !is_rep_con {
                     Ok(Protocol::write_on_slave_err())
                 } else {
                     Ok(Protocol::ok())
@@ -234,7 +235,18 @@ impl Cmd {
                 },
                 None => Ok(Protocol::BulkString(format!("default"))),
             },
-            Cmd::Replconf(_, _) => Ok(Protocol::SimpleString("OK".to_string())), // todo: support more
+            Cmd::Replconf(sub_cmd, _) => match sub_cmd.as_str() {
+                "getack" => Ok(Protocol::form_vec(vec![
+                    "REPLCONF",
+                    "ACK",
+                    server
+                        .offset
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        .to_string()
+                        .as_str(),
+                ])),
+                _ => Ok(Protocol::SimpleString("OK".to_string())),
+            },
             Cmd::Psync(_, _) => {
                 if server.is_master() {
                     Ok(Protocol::SimpleString(format!(
@@ -245,6 +257,13 @@ impl Cmd {
                     Ok(Protocol::psync_on_slave_err())
                 }
             }
+        };
+        if ret.is_ok() {
+            server.offset.fetch_add(
+                p.encode().len() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
         }
+        ret
     }
 }

@@ -1,8 +1,8 @@
 use core::str;
-use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use tokio::fs::OpenOptions;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
@@ -65,14 +65,15 @@ impl Server {
             println!("will open db file path: {}", db_file_path.display());
 
             // create empty db file if not exits
-            let file = OpenOptions::new()
+            let mut file = OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true)
-                .open(db_file_path.clone())?;
+                .open(db_file_path.clone())
+                .await?;
 
-            if file.metadata()?.len() != 0 {
-                rdb::parse_rdb_file(&file, self).await?;
+            if file.metadata().await?.len() != 0 {
+                rdb::parse_rdb_file(&mut file, self).await?;
             }
         }
         Ok(())
@@ -89,7 +90,7 @@ impl Server {
     pub async fn handle(
         self: &mut Self,
         mut stream: tokio::net::TcpStream,
-        allow_write_on_slave: bool,
+        is_rep_conn: bool,
     ) -> Result<(), DBError> {
         let mut buf = [0; 512];
         loop {
@@ -102,9 +103,13 @@ impl Server {
                 let (cmd, protocol) = Cmd::from(s)?;
                 println!("got command: {:?}, protocol: {:?}", cmd, protocol);
 
-                let res = cmd.run(self, protocol, allow_write_on_slave).await?;
-                println!("going to send response {}", res.encode());
-                stream.write(res.encode().as_bytes()).await?;
+                let res = cmd.run(self, protocol, is_rep_conn).await?;
+
+                // only send response to normal client, do not send response to replication client
+                if !is_rep_conn {
+                    println!("going to send response {}", res.encode());
+                    stream.write(res.encode().as_bytes()).await?;
+                }
 
                 // send a full RDB file to slave
                 if self.is_master() {

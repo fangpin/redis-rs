@@ -70,7 +70,7 @@ async fn main() {
             .await
             .unwrap();
         follower_repl_client.report_sync_protocol().await.unwrap();
-        follower_repl_client.start_psync().await.unwrap();
+        follower_repl_client.start_psync(&mut sc).await.unwrap();
 
         tokio::spawn(async move {
             if let Err(e) = sc.handle(follower_repl_client.stream, true).await {

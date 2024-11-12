@@ -6,7 +6,7 @@ use tokio::{
     sync::Mutex,
 };
 
-use crate::{error::DBError, protocol::Protocol, rdb};
+use crate::{error::DBError, protocol::Protocol, rdb, server::Server};
 
 const EMPTY_RDB_FILE_HEX_STRING: &str = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
 
@@ -47,14 +47,14 @@ impl FollowerReplicationClient {
         self.check_resp("OK").await
     }
 
-    pub async fn start_psync(self: &mut Self) -> Result<(), DBError> {
+    pub async fn start_psync(self: &mut Self, server: &mut Server) -> Result<(), DBError> {
         let p = Protocol::form_vec(vec!["PSYNC", "?", "-1"]);
         self.stream.write_all(p.encode().as_bytes()).await?;
-        self.recv_rdb_file().await?;
+        self.recv_rdb_file(server).await?;
         Ok(())
     }
 
-    pub async fn recv_rdb_file(self: &mut Self) -> Result<(), DBError> {
+    pub async fn recv_rdb_file(self: &mut Self, server: &mut Server) -> Result<(), DBError> {
         let mut reader = BufReader::new(&mut self.stream);
 
         let mut buf = Vec::new();
@@ -78,13 +78,19 @@ impl FollowerReplicationClient {
             replication_info[0], replication_info[1], replication_info[2]
         );
 
+        let c = reader.read_u8().await?;
+        if c != b'$' {
+            return Err(DBError(format!("expect $ but found {}", c)));
+        }
+        let mut buf = Vec::new();
+        reader.read_until(b'\n', &mut buf).await?;
+        buf.pop();
+        buf.pop();
+        let rdb_file_len = String::from_utf8(buf)?.parse::<usize>()?;
+        println!("rdb file len: {}", rdb_file_len);
+
         // receive rdb file content
-        let mut rdb_content = Vec::new();
-        reader.read_until(rdb::EOF, &mut rdb_content).await?;
-        let mut crc_buf = [0; 8];
-        let _crc = reader.read_exact(&mut crc_buf).await?;
-        rdb_content.extend_from_slice(&crc_buf);
-        println!("recv rdb file: {:?}", &rdb_content);
+        rdb::parse_rdb(&mut reader, server).await?;
         Ok(())
     }
 
@@ -126,9 +132,9 @@ impl MasterReplicationClient {
             .collect::<Result<Vec<u8>, ParseIntError>>()?;
 
         println!("going to send rdb file");
-        stream.write_all("$".as_bytes()).await?;
+        stream.write("$".as_bytes()).await?;
         stream
-            .write_all(empty_rdb_file_bytes.len().to_string().as_bytes())
+            .write(empty_rdb_file_bytes.len().to_string().as_bytes())
             .await?;
         stream.write_all("\r\n".as_bytes()).await?;
         stream.write_all(&empty_rdb_file_bytes).await?;
