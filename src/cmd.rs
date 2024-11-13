@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::{error::DBError, protocol::Protocol, server::Server};
 
 #[derive(Debug)]
@@ -15,6 +17,7 @@ pub enum Cmd {
     Replconf(String, String),
     Psync(String, String),
     Type(String),
+    Xadd(String, String, String, String),
 }
 
 impl Cmd {
@@ -85,6 +88,17 @@ impl Cmd {
                                 return Err(DBError(format!("unsupported cmd {:?}", cmd)));
                             }
                             Cmd::Type(cmd[1].clone())
+                        }
+                        "xadd" => {
+                            if cmd.len() != 5 {
+                                return Err(DBError(format!("unsupported cmd {:?}", cmd)));
+                            }
+                            Cmd::Xadd(
+                                cmd[1].clone(),
+                                cmd[2].clone(),
+                                cmd[3].clone(),
+                                cmd[4].clone(),
+                            )
                         }
                         _ => return Err(DBError(format!("unknown cmd {:?}", cmd[0]))),
                     },
@@ -266,9 +280,22 @@ impl Cmd {
             }
             Cmd::Type(k) => {
                 let v = { server.storage.lock().await.get(k) };
+                if v.is_some() {
+                    return Ok(Protocol::SimpleString("string".to_string()));
+                }
+                let streams = server.streams.lock().await;
+                let v = streams.get(k);
                 Ok(v.map_or(Protocol::none(), |_| {
-                    Protocol::SimpleString("string".to_string())
+                    Protocol::SimpleString("stream".to_string())
                 }))
+            }
+            Cmd::Xadd(stream_key, offset, key, value) => {
+                let mut streams = server.streams.lock().await;
+                streams
+                    .entry(stream_key.clone())
+                    .or_insert_with(BTreeMap::new)
+                    .insert(offset.clone(), vec![(key.clone(), value.clone())]);
+                Ok(Protocol::BulkString("0-1".to_string()))
             }
         };
         if ret.is_ok() {

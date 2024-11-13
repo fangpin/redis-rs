@@ -1,4 +1,6 @@
 use core::str;
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -15,9 +17,12 @@ use crate::replication_client::FollowerReplicationClient;
 use crate::replication_client::MasterReplicationClient;
 use crate::storage::Storage;
 
+type Stream = BTreeMap<String, Vec<(String, String)>>;
+
 #[derive(Clone)]
 pub struct Server {
     pub storage: Arc<Mutex<Storage>>,
+    pub streams: Arc<Mutex<HashMap<String, Stream>>>,
     pub option: options::DBOption,
     pub offset: Arc<AtomicU64>,
     pub master_repl_clients: Arc<Mutex<Option<MasterReplicationClient>>>,
@@ -42,6 +47,7 @@ impl Server {
 
         let mut server = Server {
             storage: Arc::new(Mutex::new(Storage::new())),
+            streams: Arc::new(Mutex::new(HashMap::new())),
             option: option,
             master_repl_clients: if is_master {
                 Arc::new(Mutex::new(Some(MasterReplicationClient::new())))

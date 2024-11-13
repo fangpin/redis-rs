@@ -1,7 +1,9 @@
 # Build Your Own Redis in Rust
 
 This project is to build a toy Redis-Server clone that's capable of parsing Redis protocol and handling basic Redis commands, parsing and initializing Redis from RDB file,
-supporting leader-follower replication.
+supporting leader-follower replication, redis streams.
+
+You can find all the source code and commit history in [my github repo](https://github.com/fangpin/redis-rs).
 
 ## Main features
 + Parse Redis protocol
@@ -40,6 +42,7 @@ redis-cli CONFIG GET dbfilename
 redis-cli KEYS "*"
 redis-cli INFO replication
 redis-cli TYPE some_key
+redis-cli XADD stream_key 1526919030474-0 temperature 36 humidity 95
 ```
 
 ## RDB Persistence
@@ -196,3 +199,28 @@ As the all the commands are encoded as RESP Array just like a normal client comm
 
 
 ## Streams
+A stream is identified by a key, and it contains multiple entries.
+Each entry consists of one or more key-value pairs, and is assigned a unique ID.
+[More about redis streams](https://redis.io/docs/latest/develop/data-types/streams/)
+[Radix tree](https://en.wikipedia.org/wiki/Radix_tree)
+
+
+It looks like a list of key-value pairs.
+```sh
+entries:
+  - id: 1526985054069-0 # (ID of the first entry)
+    temperature: 36 # (A key value pair in the first entry)
+    humidity: 95 # (Another key value pair in the first entry)
+
+  - id: 1526985054079-0 # (ID of the second entry)
+    temperature: 37 # (A key value pair in the first entry)
+    humidity: 94 # (Another key value pair in the first entry)
+
+  # ... (and so on)
+
+```
+
+Examples of Redis stream use cases include:
+- Event sourcing (e.g., tracking user actions, clicks, etc.)
+- Sensor monitoring (e.g., readings from devices in the field)
+- Notifications (e.g., storing a record of each user's notifications in a separate stream)
