@@ -295,9 +295,9 @@ impl Cmd {
                 let mut streams = server.streams.lock().await;
 
                 // split offset into two parts
-                let (offset_id, offset_seq) = split_offset(&offset);
+                let (offset_id, mut offset_seq, has_wildcard) = split_offset(&offset);
 
-                if offset_id == 0 && offset_seq == 0 {
+                if offset_id == 0 && offset_seq == 0 && !has_wildcard {
                     return Ok(Protocol::err(
                         "ERR The ID specified in XADD must be greater than 0-0",
                     ));
@@ -308,21 +308,27 @@ impl Cmd {
                     .or_insert_with(BTreeMap::new);
 
                 if let Some((last_offset, _)) = stream.last_key_value() {
-                    let (last_offset_id, last_offset_seq) = split_offset(&last_offset);
+                    let (last_offset_id, last_offset_seq, _) = split_offset(&last_offset);
                     if last_offset_id > offset_id
-                        || (last_offset_id == offset_id && last_offset_seq >= offset_seq)
+                        || (last_offset_id == offset_id
+                            && last_offset_seq >= offset_seq
+                            && !has_wildcard)
                     {
                         return Ok(Protocol::err("ERR The ID specified in XADD is equal or smaller than the target stream top item"));
                     }
+
+                    if last_offset_id == offset_id && last_offset_seq >= offset_seq && has_wildcard
+                    {
+                        offset_seq = last_offset_seq + 1;
+                    }
                 }
+
+                let offset = format!("{}-{}", offset_id, offset_seq);
 
                 for (key, value) in kvps {
                     stream.insert(offset.clone(), vec![(key.clone(), value.clone())]);
                 }
-                Ok(Protocol::BulkString(format!(
-                    "{}-{}",
-                    offset_id, offset_seq
-                )))
+                Ok(Protocol::BulkString(offset))
             }
         };
         if ret.is_ok() {
@@ -335,9 +341,14 @@ impl Cmd {
     }
 }
 
-fn split_offset(offset: &str) -> (u64, u64) {
+fn split_offset(offset: &str) -> (u64, u64, bool) {
     let offset_split = offset.split('-').collect::<Vec<_>>();
     let offset_id = offset_split[0].parse::<u64>().unwrap();
+
+    if offset_split.len() == 1 || offset_split[1] == "*" {
+        return (offset_id, if offset_id == 0 { 1 } else { 0 }, true);
+    }
+
     let offset_seq = offset_split[1].parse::<u64>().unwrap();
-    (offset_id, offset_seq)
+    (offset_id, offset_seq, false)
 }
