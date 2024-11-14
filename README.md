@@ -38,10 +38,15 @@ redis-cli ECHO hey
 redis-cli SET foo bar
 redis-cli SET foo bar px/ex 100
 redis-cli GET foo
+
 redis-cli CONFIG GET dbfilename
 redis-cli KEYS "*"
+
 redis-cli INFO replication
+
 redis-cli TYPE some_key
+
+# streams
 redis-cli XADD stream_key 1526919030474-0 temperature 36 humidity 95
 ```
 

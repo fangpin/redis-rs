@@ -17,7 +17,7 @@ pub enum Cmd {
     Replconf(String, String),
     Psync(String, String),
     Type(String),
-    Xadd(String, String, String, String),
+    Xadd(String, String, Vec<(String, String)>),
 }
 
 impl Cmd {
@@ -90,15 +90,17 @@ impl Cmd {
                             Cmd::Type(cmd[1].clone())
                         }
                         "xadd" => {
-                            if cmd.len() != 5 {
+                            if cmd.len() < 5 {
                                 return Err(DBError(format!("unsupported cmd {:?}", cmd)));
                             }
-                            Cmd::Xadd(
-                                cmd[1].clone(),
-                                cmd[2].clone(),
-                                cmd[3].clone(),
-                                cmd[4].clone(),
-                            )
+
+                            let mut key_value = Vec::<(String, String)>::new();
+                            let mut i = 3;
+                            while i < cmd.len() - 1 {
+                                key_value.push((cmd[i].clone(), cmd[i + 1].clone()));
+                                i += 2;
+                            }
+                            Cmd::Xadd(cmd[1].clone(), cmd[2].clone(), key_value)
                         }
                         _ => return Err(DBError(format!("unknown cmd {:?}", cmd[0]))),
                     },
@@ -289,13 +291,38 @@ impl Cmd {
                     Protocol::SimpleString("stream".to_string())
                 }))
             }
-            Cmd::Xadd(stream_key, offset, key, value) => {
+            Cmd::Xadd(stream_key, offset, kvps) => {
                 let mut streams = server.streams.lock().await;
-                streams
+
+                // split offset into two parts
+                let (offset_id, offset_seq) = split_offset(&offset);
+
+                if offset_id == 0 && offset_seq == 0 {
+                    return Ok(Protocol::err(
+                        "ERR The ID specified in XADD must be greater than 0-0",
+                    ));
+                }
+
+                let stream = streams
                     .entry(stream_key.clone())
-                    .or_insert_with(BTreeMap::new)
-                    .insert(offset.clone(), vec![(key.clone(), value.clone())]);
-                Ok(Protocol::BulkString("0-1".to_string()))
+                    .or_insert_with(BTreeMap::new);
+
+                if let Some((last_offset, _)) = stream.last_key_value() {
+                    let (last_offset_id, last_offset_seq) = split_offset(&last_offset);
+                    if last_offset_id > offset_id
+                        || (last_offset_id == offset_id && last_offset_seq >= offset_seq)
+                    {
+                        return Ok(Protocol::err("ERR The ID specified in XADD is equal or smaller than the target stream top item"));
+                    }
+                }
+
+                for (key, value) in kvps {
+                    stream.insert(offset.clone(), vec![(key.clone(), value.clone())]);
+                }
+                Ok(Protocol::BulkString(format!(
+                    "{}-{}",
+                    offset_id, offset_seq
+                )))
             }
         };
         if ret.is_ok() {
@@ -306,4 +333,11 @@ impl Cmd {
         }
         ret
     }
+}
+
+fn split_offset(offset: &str) -> (u64, u64) {
+    let offset_split = offset.split('-').collect::<Vec<_>>();
+    let offset_id = offset_split[0].parse::<u64>().unwrap();
+    let offset_seq = offset_split[1].parse::<u64>().unwrap();
+    (offset_id, offset_seq)
 }
