@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::{error::DBError, protocol::Protocol, server::Server};
+use crate::{error::DBError, protocol::Protocol, server::Server, storage::now_in_millis};
 
 #[derive(Debug)]
 pub enum Cmd {
@@ -294,6 +294,12 @@ impl Cmd {
             Cmd::Xadd(stream_key, offset, kvps) => {
                 let mut streams = server.streams.lock().await;
 
+                let mut offset = offset.clone();
+
+                if offset == "*" {
+                    offset = format!("{}-*", now_in_millis() as u64);
+                }
+
                 // split offset into two parts
                 let (offset_id, mut offset_seq, has_wildcard) = split_offset(&offset);
 
@@ -343,7 +349,10 @@ impl Cmd {
 
 fn split_offset(offset: &str) -> (u64, u64, bool) {
     let offset_split = offset.split('-').collect::<Vec<_>>();
-    let offset_id = offset_split[0].parse::<u64>().unwrap();
+    let offset_id = offset_split[0].parse::<u64>().expect(&format!(
+        "ERR The ID specified in XADD must be a number: {}",
+        offset
+    ));
 
     if offset_split.len() == 1 || offset_split[1] == "*" {
         return (offset_id, if offset_id == 0 { 1 } else { 0 }, true);

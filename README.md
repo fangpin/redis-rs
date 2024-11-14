@@ -48,6 +48,8 @@ redis-cli TYPE some_key
 
 # streams
 redis-cli XADD stream_key 1526919030474-0 temperature 36 humidity 95
+redis-cli XADD stream_key 1526919030474-* temperature 37 humidity 94
+redis-cli XADD stream_key "*" foo bar
 ```
 
 ## RDB Persistence
