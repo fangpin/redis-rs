@@ -1,6 +1,7 @@
 ---
-title: Home
-layout: home
+title: 旨在从 0 到 1 实现一个基础的 redis-server 版本。其包含：
+layout: default
+nav_order: 1
 ---
 
 # 概览
