@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, ops::Bound};
 
 use crate::{error::DBError, protocol::Protocol, server::Server, storage::now_in_millis};
 
@@ -18,6 +18,7 @@ pub enum Cmd {
     Psync(String, String),
     Type(String),
     Xadd(String, String, Vec<(String, String)>),
+    Xrange(String, String, String),
 }
 
 impl Cmd {
@@ -101,6 +102,12 @@ impl Cmd {
                                 i += 2;
                             }
                             Cmd::Xadd(cmd[1].clone(), cmd[2].clone(), key_value)
+                        }
+                        "xrange" => {
+                            if cmd.len() != 4 {
+                                return Err(DBError(format!("unsupported cmd {:?}", cmd)));
+                            }
+                            Cmd::Xrange(cmd[1].clone(), cmd[2].clone(), cmd[3].clone())
                         }
                         _ => return Err(DBError(format!("unknown cmd {:?}", cmd[0]))),
                     },
@@ -259,7 +266,7 @@ impl Cmd {
                 None => Ok(Protocol::BulkString(format!("default"))),
             },
             Cmd::Replconf(sub_cmd, _) => match sub_cmd.as_str() {
-                "getack" => Ok(Protocol::form_vec(vec![
+                "getack" => Ok(Protocol::from_vec(vec![
                     "REPLCONF",
                     "ACK",
                     server
@@ -292,8 +299,6 @@ impl Cmd {
                 }))
             }
             Cmd::Xadd(stream_key, offset, kvps) => {
-                let mut streams = server.streams.lock().await;
-
                 let mut offset = offset.clone();
 
                 if offset == "*" {
@@ -309,6 +314,7 @@ impl Cmd {
                     ));
                 }
 
+                let mut streams = server.streams.lock().await;
                 let stream = streams
                     .entry(stream_key.clone())
                     .or_insert_with(BTreeMap::new);
@@ -331,10 +337,31 @@ impl Cmd {
 
                 let offset = format!("{}-{}", offset_id, offset_seq);
 
+                let s = stream.entry(offset.clone()).or_insert_with(Vec::new);
                 for (key, value) in kvps {
-                    stream.insert(offset.clone(), vec![(key.clone(), value.clone())]);
+                    s.push((key.clone(), value.clone()));
                 }
+                // println!("after xadd: {:?}", streams);
                 Ok(Protocol::BulkString(offset))
+            }
+            Cmd::Xrange(stream_key, start, end) => {
+                let streams = server.streams.lock().await;
+                let stream = streams.get(stream_key);
+                Ok(stream.map_or(Protocol::none(), |s| {
+                    let range =
+                        s.range::<String, _>((Bound::Included(start), Bound::Included(end)));
+                    let mut array = Vec::new();
+                    for (k, v) in range {
+                        array.push(Protocol::BulkString(k.clone()));
+                        array.push(Protocol::from_vec(
+                            v.into_iter()
+                                .flat_map(|(a, b)| vec![a.as_str(), b.as_str()])
+                                .collect(),
+                        ))
+                    }
+                    println!("after xrange: {:?}", array);
+                    Protocol::Array(array)
+                }))
             }
         };
         if ret.is_ok() {

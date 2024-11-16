@@ -31,7 +31,7 @@ impl FollowerReplicationClient {
     }
 
     pub async fn report_port(self: &mut Self, port: u16) -> Result<(), DBError> {
-        let protocol = Protocol::form_vec(vec![
+        let protocol = Protocol::from_vec(vec![
             "REPLCONF",
             "listening-port",
             port.to_string().as_str(),
@@ -42,13 +42,13 @@ impl FollowerReplicationClient {
     }
 
     pub async fn report_sync_protocol(self: &mut Self) -> Result<(), DBError> {
-        let p = Protocol::form_vec(vec!["REPLCONF", "capa", "psync2"]);
+        let p = Protocol::from_vec(vec!["REPLCONF", "capa", "psync2"]);
         self.stream.write_all(p.encode().as_bytes()).await?;
         self.check_resp("OK").await
     }
 
     pub async fn start_psync(self: &mut Self, server: &mut Server) -> Result<(), DBError> {
-        let p = Protocol::form_vec(vec!["PSYNC", "?", "-1"]);
+        let p = Protocol::from_vec(vec!["PSYNC", "?", "-1"]);
         self.stream.write_all(p.encode().as_bytes()).await?;
         self.recv_rdb_file(server).await?;
         Ok(())

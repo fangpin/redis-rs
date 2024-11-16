@@ -25,7 +25,7 @@ impl Protocol {
         }
     }
 
-    pub fn form_vec(array: Vec<&str>) -> Self {
+    pub fn from_vec(array: Vec<&str>) -> Self {
         let array = array
             .into_iter()
             .map(|x| Protocol::BulkString(x.to_string()))
