@@ -1,0 +1,8 @@
+title: 从 0 到 1 由 Rust 构建 Redis
+description: 从 0 到 1 由 Rust 构建 Redis
+theme: just-the-docs
+
+url: https://fangpin.github.io/redis-rs
+
+aux_links:
+  Template Repository: https://fangpin.github.io/redis-rs
