@@ -1,5 +1,5 @@
 ---
-title: 旨在从 0 到 1 实现一个基础的 redis-server 版本。其包含：
+title: 概览
 layout: default
 nav_order: 1
 ---
