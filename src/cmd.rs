@@ -1,4 +1,6 @@
-use std::{collections::BTreeMap, ops::Bound};
+use std::{collections::BTreeMap, ops::Bound, u64};
+
+use futures::SinkExt;
 
 use crate::{error::DBError, protocol::Protocol, server::Server, storage::now_in_millis};
 
@@ -348,13 +350,14 @@ impl Cmd {
                 let streams = server.streams.lock().await;
                 let stream = streams.get(stream_key);
                 Ok(stream.map_or(Protocol::none(), |s| {
+                    let end = (end.parse::<u64>().unwrap() + 1).to_string();
                     let range =
-                        s.range::<String, _>((Bound::Included(start), Bound::Included(end)));
+                        s.range::<String, _>((Bound::Included(start), Bound::Included(&end)));
                     let mut array = Vec::new();
                     for (k, v) in range {
                         array.push(Protocol::BulkString(k.clone()));
                         array.push(Protocol::from_vec(
-                            v.into_iter()
+                            v.iter()
                                 .flat_map(|(a, b)| vec![a.as_str(), b.as_str()])
                                 .collect(),
                         ))
