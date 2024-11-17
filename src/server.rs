@@ -48,7 +48,7 @@ impl Server {
         let mut server = Server {
             storage: Arc::new(Mutex::new(Storage::new())),
             streams: Arc::new(Mutex::new(HashMap::new())),
-            option: option,
+            option,
             master_repl_clients: if is_master {
                 Arc::new(Mutex::new(Some(MasterReplicationClient::new())))
             } else {
@@ -62,7 +62,7 @@ impl Server {
         server
     }
 
-    pub async fn init(self: &mut Self) -> Result<(), DBError> {
+    pub async fn init(&mut self) -> Result<(), DBError> {
         // master initialization
         if self.is_master() {
             println!("Start as master\n");
@@ -75,6 +75,7 @@ impl Server {
                 .read(true)
                 .write(true)
                 .create(true)
+                .truncate(false)
                 .open(db_file_path.clone())
                 .await?;
 
@@ -85,7 +86,7 @@ impl Server {
         Ok(())
     }
 
-    pub async fn get_follower_repl_client(self: &mut Self) -> Option<FollowerReplicationClient> {
+    pub async fn get_follower_repl_client(&mut self) -> Option<FollowerReplicationClient> {
         if self.is_slave() {
             Some(FollowerReplicationClient::new(self.master_addr.clone().unwrap()).await)
         } else {
@@ -94,7 +95,7 @@ impl Server {
     }
 
     pub async fn handle(
-        self: &mut Self,
+        &mut self,
         mut stream: tokio::net::TcpStream,
         is_rep_conn: bool,
     ) -> Result<(), DBError> {
@@ -114,20 +115,17 @@ impl Server {
                 // only send response to normal client, do not send response to replication client
                 if !is_rep_conn {
                     println!("going to send response {}", res.encode());
-                    stream.write(res.encode().as_bytes()).await?;
+                    _ = stream.write(res.encode().as_bytes()).await?;
                 }
 
                 // send a full RDB file to slave
                 if self.is_master() {
-                    match cmd {
-                        Cmd::Psync(_, _) => {
-                            let mut master_rep_client = self.master_repl_clients.lock().await;
-                            let master_rep_client = master_rep_client.as_mut().unwrap();
-                            master_rep_client.send_rdb_file(&mut stream).await?;
-                            master_rep_client.add_stream(stream).await?;
-                            break;
-                        }
-                        _ => {} // do nothing for other commands
+                    if let Cmd::Psync = cmd {
+                        let mut master_rep_client = self.master_repl_clients.lock().await;
+                        let master_rep_client = master_rep_client.as_mut().unwrap();
+                        master_rep_client.send_rdb_file(&mut stream).await?;
+                        master_rep_client.add_stream(stream).await?;
+                        break;
                     }
                 }
             } else {

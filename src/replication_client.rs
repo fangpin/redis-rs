@@ -11,14 +11,12 @@ use crate::{error::DBError, protocol::Protocol, rdb, server::Server};
 const EMPTY_RDB_FILE_HEX_STRING: &str = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
 
 pub struct FollowerReplicationClient {
-    master_addr: String,
     pub stream: TcpStream,
 }
 
 impl FollowerReplicationClient {
     pub async fn new(addr: String) -> FollowerReplicationClient {
         FollowerReplicationClient {
-            master_addr: addr.clone(),
             stream: TcpStream::connect(addr).await.unwrap(),
         }
     }
@@ -94,7 +92,7 @@ impl FollowerReplicationClient {
         Ok(())
     }
 
-    pub async fn check_resp(self: &mut Self, expected: &str) -> Result<(), DBError> {
+    pub async fn check_resp(&mut self, expected: &str) -> Result<(), DBError> {
         let mut buf = [0; 1024];
         let n_bytes = self.stream.read(&mut buf).await?;
         println!(
@@ -125,29 +123,29 @@ impl MasterReplicationClient {
         }
     }
 
-    pub async fn send_rdb_file(self: &mut Self, stream: &mut TcpStream) -> Result<(), DBError> {
+    pub async fn send_rdb_file(&mut self, stream: &mut TcpStream) -> Result<(), DBError> {
         let empty_rdb_file_bytes = (0..EMPTY_RDB_FILE_HEX_STRING.len())
             .step_by(2)
             .map(|i| u8::from_str_radix(&EMPTY_RDB_FILE_HEX_STRING[i..i + 2], 16))
             .collect::<Result<Vec<u8>, ParseIntError>>()?;
 
         println!("going to send rdb file");
-        stream.write("$".as_bytes()).await?;
-        stream
+        _ = stream.write("$".as_bytes()).await?;
+        _ = stream
             .write(empty_rdb_file_bytes.len().to_string().as_bytes())
             .await?;
-        stream.write_all("\r\n".as_bytes()).await?;
-        stream.write_all(&empty_rdb_file_bytes).await?;
+        _ = stream.write_all("\r\n".as_bytes()).await?;
+        _ = stream.write_all(&empty_rdb_file_bytes).await?;
         Ok(())
     }
 
-    pub async fn add_stream(self: &mut Self, stream: TcpStream) -> Result<(), DBError> {
+    pub async fn add_stream(&mut self, stream: TcpStream) -> Result<(), DBError> {
         let mut streams = self.streams.lock().await;
         streams.push(stream);
         Ok(())
     }
 
-    pub async fn send_command(self: &mut Self, protocol: Protocol) -> Result<(), DBError> {
+    pub async fn send_command(&mut self, protocol: Protocol) -> Result<(), DBError> {
         let mut streams = self.streams.lock().await;
         for stream in streams.iter_mut() {
             stream.write_all(protocol.encode().as_bytes()).await?;

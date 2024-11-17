@@ -1,7 +1,5 @@
 use std::{collections::BTreeMap, ops::Bound, u64};
 
-use futures::SinkExt;
-
 use crate::{error::DBError, protocol::Protocol, server::Server, storage::now_in_millis};
 
 #[derive(Debug)]
@@ -16,11 +14,12 @@ pub enum Cmd {
     ConfigGet(String),
     Info(Option<String>),
     Del(String),
-    Replconf(String, String),
-    Psync(String, String),
+    Replconf(String),
+    Psync,
     Type(String),
     Xadd(String, String, Vec<(String, String)>),
     Xrange(String, String, String),
+    Xread(String, String),
 }
 
 impl Cmd {
@@ -72,13 +71,13 @@ impl Cmd {
                             if cmd.len() < 3 {
                                 return Err(DBError(format!("unsupported cmd {:?}", cmd)));
                             }
-                            Cmd::Replconf(cmd[1].clone(), cmd[2].clone())
+                            Cmd::Replconf(cmd[1].clone())
                         }
                         "psync" => {
                             if cmd.len() != 3 {
                                 return Err(DBError(format!("unsupported cmd {:?}", cmd)));
                             }
-                            Cmd::Psync(cmd[1].clone(), cmd[2].clone())
+                            Cmd::Psync
                         }
                         "del" => {
                             if cmd.len() != 2 {
@@ -111,7 +110,13 @@ impl Cmd {
                             }
                             Cmd::Xrange(cmd[1].clone(), cmd[2].clone(), cmd[3].clone())
                         }
-                        _ => return Err(DBError(format!("unknown cmd {:?}", cmd[0]))),
+                        "xread" => {
+                            if cmd.len() != 4 {
+                                return Err(DBError(format!("unsupported cmd {:?}", cmd)));
+                            }
+                            Cmd::Xread(cmd[2].clone(), cmd[3].clone())
+                        }
+                        _ => return Err(DBError(format!("unsupported cmd {:?}", cmd[0]))),
                     },
                     protocol.0,
                 ))
@@ -124,7 +129,7 @@ impl Cmd {
     }
 
     pub async fn run(
-        self: &Self,
+        &self,
         server: &mut Server,
         protocol: Protocol,
         is_rep_con: bool,
@@ -134,201 +139,31 @@ impl Cmd {
         let ret = match self {
             Cmd::Ping => Ok(Protocol::SimpleString("PONG".to_string())),
             Cmd::Echo(s) => Ok(Protocol::SimpleString(s.clone())),
-            Cmd::Get(k) => {
-                let v = {
-                    let mut s = server.storage.lock().await;
-                    s.get(k)
-                };
-                Ok(v.map_or(Protocol::Null, Protocol::SimpleString))
-            }
-            Cmd::Set(k, v) => {
-                let offset = {
-                    let mut s = server.storage.lock().await;
-                    s.set(k.clone(), v.clone());
-                    server
-                        .offset
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                        + 1
-                };
-                resp_and_replicate(server, Protocol::ok(), protocol, is_rep_con).await?
-            }
-            Cmd::SetPx(k, v, x) => {
-                let offset = {
-                    let mut s = server.storage.lock().await;
-                    s.setx(k.clone(), v.clone(), *x);
-                    server
-                        .offset
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                };
-                resp_and_replicate(server, Protocol::ok(), protocol, is_rep_con).await?
-            }
-            Cmd::SetEx(k, v, x) => {
-                let offset = {
-                    let mut s = server.storage.lock().await;
-                    s.setx(k.clone(), v.clone(), *x * 1000);
-                    server
-                        .offset
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                };
-                resp_and_replicate(server, Protocol::ok(), protocol, is_rep_con).await?
-            }
-            Cmd::Del(k) => {
-                let offset = {
-                    let mut s = server.storage.lock().await;
-                    s.del(k.clone());
-                    server
-                        .offset
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                };
-                resp_and_replicate(server, Protocol::ok(), protocol, is_rep_con).await?
-            }
-            Cmd::ConfigGet(name) => match name.as_str() {
-                "dir" => Ok(Protocol::Array(vec![
-                    Protocol::BulkString(name.clone()),
-                    Protocol::BulkString(server.option.dir.clone()),
-                ])),
-                "dbfilename" => Ok(Protocol::Array(vec![
-                    Protocol::BulkString(name.clone()),
-                    Protocol::BulkString(server.option.db_file_name.clone()),
-                ])),
-                _ => Err(DBError(format!("unsupported config {:?}", name))),
-            },
-            Cmd::Keys => {
-                let keys = { server.storage.lock().await.keys() };
-                Ok(Protocol::Array(
-                    keys.into_iter().map(Protocol::BulkString).collect(),
-                ))
-            }
-            Cmd::Info(section) => match section {
-                Some(s) => match s.as_str() {
-                    "replication" => Ok(Protocol::BulkString(format!(
-                        "role:{}\nmaster_replid:{}\nmaster_repl_offset:{}\n",
-                        server.option.replication.role,
-                        server.option.replication.master_replid,
-                        server.option.replication.master_repl_offset
-                    ))),
-                    _ => Err(DBError(format!("unsupported section {:?}", s))),
-                },
-                None => Ok(Protocol::BulkString(format!("default"))),
-            },
-            Cmd::Replconf(sub_cmd, _) => match sub_cmd.as_str() {
-                "getack" => Ok(Protocol::from_vec(vec![
-                    "REPLCONF",
-                    "ACK",
-                    server
-                        .offset
-                        .load(std::sync::atomic::Ordering::Relaxed)
-                        .to_string()
-                        .as_str(),
-                ])),
-                _ => Ok(Protocol::SimpleString("OK".to_string())),
-            },
-            Cmd::Psync(_, _) => {
-                if server.is_master() {
-                    Ok(Protocol::SimpleString(format!(
-                        "FULLRESYNC {} 0",
-                        server.option.replication.master_replid
-                    )))
-                } else {
-                    Ok(Protocol::psync_on_slave_err())
-                }
-            }
-            Cmd::Type(k) => {
-                let v = { server.storage.lock().await.get(k) };
-                if v.is_some() {
-                    return Ok(Protocol::SimpleString("string".to_string()));
-                }
-                let streams = server.streams.lock().await;
-                let v = streams.get(k);
-                Ok(v.map_or(Protocol::none(), |_| {
-                    Protocol::SimpleString("stream".to_string())
-                }))
-            }
+            Cmd::Get(k) => get_cmd(server, k).await,
+            Cmd::Set(k, v) => set_cmd(server, k, v, protocol, is_rep_con).await,
+            Cmd::SetPx(k, v, x) => set_px_cmd(server, k, v, x, protocol, is_rep_con).await,
+            Cmd::SetEx(k, v, x) => set_ex_cmd(server, k, v, x, protocol, is_rep_con).await,
+            Cmd::Del(k) => del_cmd(server, k, protocol, is_rep_con).await,
+            Cmd::ConfigGet(name) => config_get_cmd(name, server),
+            Cmd::Keys => keys_cmd(server).await,
+            Cmd::Info(section) => info_cmd(section, server),
+            Cmd::Replconf(sub_cmd) => replconf_cmd(sub_cmd, server),
+            Cmd::Psync => psync_cmd(server),
+            Cmd::Type(k) => type_cmd(server, k).await,
             Cmd::Xadd(stream_key, offset, kvps) => {
-                let mut offset = offset.clone();
-
-                if offset == "*" {
-                    offset = format!("{}-*", now_in_millis() as u64);
-                }
-
-                // split offset into two parts
-                let (offset_id, mut offset_seq, has_wildcard) = split_offset(&offset);
-
-                if offset_id == 0 && offset_seq == 0 && !has_wildcard {
-                    return Ok(Protocol::err(
-                        "ERR The ID specified in XADD must be greater than 0-0",
-                    ));
-                }
-
-                {
-                    let mut streams = server.streams.lock().await;
-                    let stream = streams
-                        .entry(stream_key.clone())
-                        .or_insert_with(BTreeMap::new);
-
-                    if let Some((last_offset, _)) = stream.last_key_value() {
-                        let (last_offset_id, last_offset_seq, _) = split_offset(&last_offset);
-                        if last_offset_id > offset_id
-                            || (last_offset_id == offset_id
-                                && last_offset_seq >= offset_seq
-                                && !has_wildcard)
-                        {
-                            return Ok(Protocol::err("ERR The ID specified in XADD is equal or smaller than the target stream top item"));
-                        }
-
-                        if last_offset_id == offset_id
-                            && last_offset_seq >= offset_seq
-                            && has_wildcard
-                        {
-                            offset_seq = last_offset_seq + 1;
-                        }
-                    }
-
-                    let offset = format!("{}-{}", offset_id, offset_seq);
-
-                    let s = stream.entry(offset.clone()).or_insert_with(Vec::new);
-                    for (key, value) in kvps {
-                        s.push((key.clone(), value.clone()));
-                    }
-                }
-                // println!("after xadd: {:?}", streams);
-                resp_and_replicate(server, Protocol::BulkString(offset), protocol, is_rep_con)
-                    .await?
+                xadd_cmd(
+                    offset.as_str(),
+                    server,
+                    stream_key.as_str(),
+                    kvps,
+                    protocol,
+                    is_rep_con,
+                )
+                .await
             }
-            Cmd::Xrange(stream_key, start, end) => {
-                let streams = server.streams.lock().await;
-                let stream = streams.get(stream_key);
-                Ok(stream.map_or(Protocol::none(), |s| {
-                    // support query with '-'
-                    let start = if start == "-" {
-                        "0".to_string()
-                    } else {
-                        start.clone()
-                    };
 
-                    // support query with '+'
-                    let end = if end == "+" {
-                        u64::MAX.to_string()
-                    } else {
-                        (end.parse::<u64>().unwrap() + 1).to_string()
-                    };
-
-                    // query stream range
-                    let range =
-                        s.range::<String, _>((Bound::Included(&start), Bound::Included(&end)));
-                    let mut array = Vec::new();
-                    for (k, v) in range {
-                        array.push(Protocol::BulkString(k.clone()));
-                        array.push(Protocol::from_vec(
-                            v.iter()
-                                .flat_map(|(a, b)| vec![a.as_str(), b.as_str()])
-                                .collect(),
-                        ))
-                    }
-                    println!("after xrange: {:?}", array);
-                    Protocol::Array(array)
-                }))
-            }
+            Cmd::Xrange(stream_key, start, end) => xrange_cmd(server, stream_key, start, end).await,
+            Cmd::Xread(stream_key, start) => xread_cmd(start, server, stream_key).await,
         };
         if ret.is_ok() {
             server.offset.fetch_add(
@@ -340,13 +175,292 @@ impl Cmd {
     }
 }
 
+fn config_get_cmd(name: &String, server: &mut Server) -> Result<Protocol, DBError> {
+    match name.as_str() {
+        "dir" => Ok(Protocol::Array(vec![
+            Protocol::BulkString(name.clone()),
+            Protocol::BulkString(server.option.dir.clone()),
+        ])),
+        "dbfilename" => Ok(Protocol::Array(vec![
+            Protocol::BulkString(name.clone()),
+            Protocol::BulkString(server.option.db_file_name.clone()),
+        ])),
+        _ => Err(DBError(format!("unsupported config {:?}", name))),
+    }
+}
+
+async fn keys_cmd(server: &mut Server) -> Result<Protocol, DBError> {
+    let keys = { server.storage.lock().await.keys() };
+    Ok(Protocol::Array(
+        keys.into_iter().map(Protocol::BulkString).collect(),
+    ))
+}
+
+fn info_cmd(section: &Option<String>, server: &mut Server) -> Result<Protocol, DBError> {
+    match section {
+        Some(s) => match s.as_str() {
+            "replication" => Ok(Protocol::BulkString(format!(
+                "role:{}\nmaster_replid:{}\nmaster_repl_offset:{}\n",
+                server.option.replication.role,
+                server.option.replication.master_replid,
+                server.option.replication.master_repl_offset
+            ))),
+            _ => Err(DBError(format!("unsupported section {:?}", s))),
+        },
+        None => Ok(Protocol::BulkString("default".to_string())),
+    }
+}
+
+async fn xread_cmd(
+    start: &str,
+    server: &mut Server,
+    stream_key: &String,
+) -> Result<Protocol, DBError> {
+    let streams = server.streams.lock().await;
+    let stream = streams.get(stream_key);
+    Ok(stream.map_or(Protocol::none(), |s| {
+        let (offset_id, mut offset_seq, _) = split_offset(start);
+        offset_seq += 1;
+        let start = format!("{}-{}", offset_id, offset_seq);
+        let end = format!("{}-{}", u64::MAX - 1, 0);
+
+        // query stream range
+        let range = s.range::<String, _>((Bound::Included(&start), Bound::Included(&end)));
+        let mut array = Vec::new();
+        for (k, v) in range {
+            array.push(Protocol::BulkString(k.clone()));
+            array.push(Protocol::from_vec(
+                v.iter()
+                    .flat_map(|(a, b)| vec![a.as_str(), b.as_str()])
+                    .collect(),
+            ))
+        }
+        Protocol::Array(vec![
+            Protocol::BulkString(stream_key.clone()),
+            Protocol::Array(array),
+        ])
+    }))
+}
+
+fn replconf_cmd(sub_cmd: &str, server: &mut Server) -> Result<Protocol, DBError> {
+    match sub_cmd {
+        "getack" => Ok(Protocol::from_vec(vec![
+            "REPLCONF",
+            "ACK",
+            server
+                .offset
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .to_string()
+                .as_str(),
+        ])),
+        _ => Ok(Protocol::SimpleString("OK".to_string())),
+    }
+}
+
+async fn xrange_cmd(
+    server: &mut Server,
+    stream_key: &String,
+    start: &String,
+    end: &String,
+) -> Result<Protocol, DBError> {
+    let streams = server.streams.lock().await;
+    let stream = streams.get(stream_key);
+    Ok(stream.map_or(Protocol::none(), |s| {
+        // support query with '-'
+        let start = if start == "-" {
+            "0".to_string()
+        } else {
+            start.clone()
+        };
+
+        // support query with '+'
+        let end = if end == "+" {
+            u64::MAX.to_string()
+        } else {
+            end.clone()
+        };
+
+        // query stream range
+        let range = s.range::<String, _>((Bound::Included(&start), Bound::Included(&end)));
+        let mut array = Vec::new();
+        for (k, v) in range {
+            array.push(Protocol::BulkString(k.clone()));
+            array.push(Protocol::from_vec(
+                v.iter()
+                    .flat_map(|(a, b)| vec![a.as_str(), b.as_str()])
+                    .collect(),
+            ))
+        }
+        println!("after xrange: {:?}", array);
+        Protocol::Array(array)
+    }))
+}
+
+async fn xadd_cmd(
+    offset: &str,
+    server: &mut Server,
+    stream_key: &str,
+    kvps: &Vec<(String, String)>,
+    protocol: Protocol,
+    is_rep_con: bool,
+) -> Result<Protocol, DBError> {
+    let mut offset = offset.to_string();
+    if offset == "*" {
+        offset = format!("{}-*", now_in_millis() as u64);
+    }
+    let (offset_id, mut offset_seq, has_wildcard) = split_offset(offset.as_str());
+    if offset_id == 0 && offset_seq == 0 && !has_wildcard {
+        return Ok(Protocol::err(
+            "ERR The ID specified in XADD must be greater than 0-0",
+        ));
+    }
+    {
+        let mut streams = server.streams.lock().await;
+        let stream = streams
+            .entry(stream_key.to_string())
+            .or_insert_with(BTreeMap::new);
+
+        if let Some((last_offset, _)) = stream.last_key_value() {
+            let (last_offset_id, last_offset_seq, _) = split_offset(last_offset.as_str());
+            if last_offset_id > offset_id
+                || (last_offset_id == offset_id && last_offset_seq >= offset_seq && !has_wildcard)
+            {
+                return Ok(Protocol::err("ERR The ID specified in XADD is equal or smaller than the target stream top item"));
+            }
+
+            if last_offset_id == offset_id && last_offset_seq >= offset_seq && has_wildcard {
+                offset_seq = last_offset_seq + 1;
+            }
+        }
+
+        let offset = format!("{}-{}", offset_id, offset_seq);
+
+        let s = stream.entry(offset.clone()).or_insert_with(Vec::new);
+        for (key, value) in kvps {
+            s.push((key.clone(), value.clone()));
+        }
+    }
+    resp_and_replicate(
+        server,
+        Protocol::BulkString(offset.to_string()),
+        protocol,
+        is_rep_con,
+    )
+    .await
+}
+
+async fn type_cmd(server: &mut Server, k: &String) -> Result<Protocol, DBError> {
+    let v = { server.storage.lock().await.get(k) };
+    if v.is_some() {
+        return Ok(Protocol::SimpleString("string".to_string()));
+    }
+    let streams = server.streams.lock().await;
+    let v = streams.get(k);
+    Ok(v.map_or(Protocol::none(), |_| {
+        Protocol::SimpleString("stream".to_string())
+    }))
+}
+
+fn psync_cmd(server: &mut Server) -> Result<Protocol, DBError> {
+    if server.is_master() {
+        Ok(Protocol::SimpleString(format!(
+            "FULLRESYNC {} 0",
+            server.option.replication.master_replid
+        )))
+    } else {
+        Ok(Protocol::psync_on_slave_err())
+    }
+}
+
+async fn del_cmd(
+    server: &mut Server,
+    k: &String,
+    protocol: Protocol,
+    is_rep_con: bool,
+) -> Result<Protocol, DBError> {
+    // offset
+    let _ = {
+        let mut s = server.storage.lock().await;
+        s.del(k.clone());
+        server
+            .offset
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    };
+    resp_and_replicate(server, Protocol::ok(), protocol, is_rep_con).await
+}
+
+async fn set_ex_cmd(
+    server: &mut Server,
+    k: &String,
+    v: &String,
+    x: &u128,
+    protocol: Protocol,
+    is_rep_con: bool,
+) -> Result<Protocol, DBError> {
+    // offset
+    let _ = {
+        let mut s = server.storage.lock().await;
+        s.setx(k.clone(), v.clone(), *x * 1000);
+        server
+            .offset
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    };
+    resp_and_replicate(server, Protocol::ok(), protocol, is_rep_con).await
+}
+
+async fn set_px_cmd(
+    server: &mut Server,
+    k: &String,
+    v: &String,
+    x: &u128,
+    protocol: Protocol,
+    is_rep_con: bool,
+) -> Result<Protocol, DBError> {
+    // offset
+    let _ = {
+        let mut s = server.storage.lock().await;
+        s.setx(k.clone(), v.clone(), *x);
+        server
+            .offset
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    };
+    resp_and_replicate(server, Protocol::ok(), protocol, is_rep_con).await
+}
+
+async fn set_cmd(
+    server: &mut Server,
+    k: &String,
+    v: &String,
+    protocol: Protocol,
+    is_rep_con: bool,
+) -> Result<Protocol, DBError> {
+    // offset
+    let _ = {
+        let mut s = server.storage.lock().await;
+        s.set(k.clone(), v.clone());
+        server
+            .offset
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1
+    };
+    resp_and_replicate(server, Protocol::ok(), protocol, is_rep_con).await
+}
+
+async fn get_cmd(server: &mut Server, k: &String) -> Result<Protocol, DBError> {
+    let v = {
+        let mut s = server.storage.lock().await;
+        s.get(k)
+    };
+    Ok(v.map_or(Protocol::Null, Protocol::SimpleString))
+}
+
 async fn resp_and_replicate(
     server: &mut Server,
     resp: Protocol,
     replication: Protocol,
     is_rep_con: bool,
-) -> Result<Result<Protocol, DBError>, DBError> {
-    Ok(if server.is_master() {
+) -> Result<Protocol, DBError> {
+    if server.is_master() {
         server
             .master_repl_clients
             .lock()
@@ -355,12 +469,12 @@ async fn resp_and_replicate(
             .unwrap()
             .send_command(replication)
             .await?;
-        Ok(Protocol::ok())
+        Ok(resp)
     } else if !is_rep_con {
         Ok(Protocol::write_on_slave_err())
     } else {
         Ok(resp)
-    })
+    }
 }
 
 fn split_offset(offset: &str) -> (u64, u64, bool) {
