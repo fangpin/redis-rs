@@ -19,7 +19,7 @@ pub enum Cmd {
     Type(String),
     Xadd(String, String, Vec<(String, String)>),
     Xrange(String, String, String),
-    Xread(String, String),
+    Xread(Vec<String>, Vec<String>),
 }
 
 impl Cmd {
@@ -111,10 +111,12 @@ impl Cmd {
                             Cmd::Xrange(cmd[1].clone(), cmd[2].clone(), cmd[3].clone())
                         }
                         "xread" => {
-                            if cmd.len() != 4 {
+                            if cmd.len() < 4 || cmd.len() % 2 != 0 {
                                 return Err(DBError(format!("unsupported cmd {:?}", cmd)));
                             }
-                            Cmd::Xread(cmd[2].clone(), cmd[3].clone())
+                            let cmd2 = &cmd[2..];
+                            let len2 = cmd2.len() / 2;
+                            Cmd::Xread(cmd2[0..len2].to_vec(), cmd2[len2..].to_vec())
                         }
                         _ => return Err(DBError(format!("unsupported cmd {:?}", cmd[0]))),
                     },
@@ -163,7 +165,7 @@ impl Cmd {
             }
 
             Cmd::Xrange(stream_key, start, end) => xrange_cmd(server, stream_key, start, end).await,
-            Cmd::Xread(stream_key, start) => xread_cmd(start, server, stream_key).await,
+            Cmd::Xread(stream_keys, starts) => xread_cmd(starts, server, stream_keys).await,
         };
         if ret.is_ok() {
             server.offset.fetch_add(
@@ -212,34 +214,36 @@ fn info_cmd(section: &Option<String>, server: &mut Server) -> Result<Protocol, D
 }
 
 async fn xread_cmd(
-    start: &str,
+    starts: &[String],
     server: &mut Server,
-    stream_key: &String,
+    stream_keys: &[String],
 ) -> Result<Protocol, DBError> {
     let streams = server.streams.lock().await;
-    let stream = streams.get(stream_key);
-    Ok(stream.map_or(Protocol::none(), |s| {
-        let (offset_id, mut offset_seq, _) = split_offset(start);
-        offset_seq += 1;
-        let start = format!("{}-{}", offset_id, offset_seq);
-        let end = format!("{}-{}", u64::MAX - 1, 0);
+    let mut ret = Vec::new();
+    for (i, stream_key) in stream_keys.iter().enumerate() {
+        let stream = streams.get(stream_key);
+        if let Some(s) = stream {
+            let (offset_id, mut offset_seq, _) = split_offset(starts[i].as_str());
+            offset_seq += 1;
+            let start = format!("{}-{}", offset_id, offset_seq);
+            let end = format!("{}-{}", u64::MAX - 1, 0);
 
-        // query stream range
-        let range = s.range::<String, _>((Bound::Included(&start), Bound::Included(&end)));
-        let mut array = Vec::new();
-        for (k, v) in range {
-            array.push(Protocol::BulkString(k.clone()));
-            array.push(Protocol::from_vec(
-                v.iter()
-                    .flat_map(|(a, b)| vec![a.as_str(), b.as_str()])
-                    .collect(),
-            ))
+            // query stream range
+            let range = s.range::<String, _>((Bound::Included(&start), Bound::Included(&end)));
+            let mut array = Vec::new();
+            for (k, v) in range {
+                array.push(Protocol::BulkString(k.clone()));
+                array.push(Protocol::from_vec(
+                    v.iter()
+                        .flat_map(|(a, b)| vec![a.as_str(), b.as_str()])
+                        .collect(),
+                ))
+            }
+            ret.push(Protocol::BulkString(stream_key.clone()));
+            ret.push(Protocol::Array(array));
         }
-        Protocol::Array(vec![
-            Protocol::BulkString(stream_key.clone()),
-            Protocol::Array(array),
-        ])
-    }))
+    }
+    Ok(Protocol::Array(ret))
 }
 
 fn replconf_cmd(sub_cmd: &str, server: &mut Server) -> Result<Protocol, DBError> {

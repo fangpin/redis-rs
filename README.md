@@ -54,6 +54,11 @@ redis-cli XADD stream_key "*" foo bar
 redis-cli XRANGE stream_key 0-2 0-3
 ## query with + -
 redis-cli XRANGE some_key - 1526985054079
+## query single stream using xread
+redis-cli XREAD streams some_key 1526985054069-0
+## query multiple stream using xread
+redis-cli XREAD streams stream_key other_stream_key 0-0 0-1
+
 ```
 
 ## RDB Persistence
