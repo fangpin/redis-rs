@@ -350,9 +350,23 @@ impl Cmd {
                 let streams = server.streams.lock().await;
                 let stream = streams.get(stream_key);
                 Ok(stream.map_or(Protocol::none(), |s| {
-                    let end = (end.parse::<u64>().unwrap() + 1).to_string();
+                    // support query with '-'
+                    let start = if start == "-" {
+                        "0".to_string()
+                    } else {
+                        start.clone()
+                    };
+
+                    // support query with '+'
+                    let end = if end == "+" {
+                        u64::MAX.to_string()
+                    } else {
+                        (end.parse::<u64>().unwrap() + 1).to_string()
+                    };
+
+                    // query stream range
                     let range =
-                        s.range::<String, _>((Bound::Included(start), Bound::Included(&end)));
+                        s.range::<String, _>((Bound::Included(&start), Bound::Included(&end)));
                     let mut array = Vec::new();
                     for (k, v) in range {
                         array.push(Protocol::BulkString(k.clone()));
