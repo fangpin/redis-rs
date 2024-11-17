@@ -150,21 +150,7 @@ impl Cmd {
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                         + 1
                 };
-                if server.is_master() {
-                    server
-                        .master_repl_clients
-                        .lock()
-                        .await
-                        .as_mut()
-                        .unwrap()
-                        .send_command(protocol)
-                        .await?;
-                    Ok(Protocol::ok())
-                } else if !is_rep_con {
-                    Ok(Protocol::write_on_slave_err())
-                } else {
-                    Ok(Protocol::ok())
-                }
+                resp_and_replicate(server, Protocol::ok(), protocol, is_rep_con).await?
             }
             Cmd::SetPx(k, v, x) => {
                 let offset = {
@@ -174,21 +160,7 @@ impl Cmd {
                         .offset
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 };
-                if server.is_master() {
-                    server
-                        .master_repl_clients
-                        .lock()
-                        .await
-                        .as_mut()
-                        .unwrap()
-                        .send_command(protocol)
-                        .await?;
-                    Ok(Protocol::ok())
-                } else if !is_rep_con {
-                    Ok(Protocol::write_on_slave_err())
-                } else {
-                    Ok(Protocol::ok())
-                }
+                resp_and_replicate(server, Protocol::ok(), protocol, is_rep_con).await?
             }
             Cmd::SetEx(k, v, x) => {
                 let offset = {
@@ -198,21 +170,7 @@ impl Cmd {
                         .offset
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 };
-                if server.is_master() {
-                    server
-                        .master_repl_clients
-                        .lock()
-                        .await
-                        .as_mut()
-                        .unwrap()
-                        .send_command(protocol)
-                        .await?;
-                    Ok(Protocol::ok())
-                } else if !is_rep_con {
-                    Ok(Protocol::write_on_slave_err())
-                } else {
-                    Ok(Protocol::ok())
-                }
+                resp_and_replicate(server, Protocol::ok(), protocol, is_rep_con).await?
             }
             Cmd::Del(k) => {
                 let offset = {
@@ -222,21 +180,7 @@ impl Cmd {
                         .offset
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 };
-                if server.is_master() {
-                    server
-                        .master_repl_clients
-                        .lock()
-                        .await
-                        .as_mut()
-                        .unwrap()
-                        .send_command(protocol)
-                        .await?;
-                    Ok(Protocol::ok())
-                } else if !is_rep_con {
-                    Ok(Protocol::write_on_slave_err())
-                } else {
-                    Ok(Protocol::ok())
-                }
+                resp_and_replicate(server, Protocol::ok(), protocol, is_rep_con).await?
             }
             Cmd::ConfigGet(name) => match name.as_str() {
                 "dir" => Ok(Protocol::Array(vec![
@@ -316,35 +260,40 @@ impl Cmd {
                     ));
                 }
 
-                let mut streams = server.streams.lock().await;
-                let stream = streams
-                    .entry(stream_key.clone())
-                    .or_insert_with(BTreeMap::new);
+                {
+                    let mut streams = server.streams.lock().await;
+                    let stream = streams
+                        .entry(stream_key.clone())
+                        .or_insert_with(BTreeMap::new);
 
-                if let Some((last_offset, _)) = stream.last_key_value() {
-                    let (last_offset_id, last_offset_seq, _) = split_offset(&last_offset);
-                    if last_offset_id > offset_id
-                        || (last_offset_id == offset_id
+                    if let Some((last_offset, _)) = stream.last_key_value() {
+                        let (last_offset_id, last_offset_seq, _) = split_offset(&last_offset);
+                        if last_offset_id > offset_id
+                            || (last_offset_id == offset_id
+                                && last_offset_seq >= offset_seq
+                                && !has_wildcard)
+                        {
+                            return Ok(Protocol::err("ERR The ID specified in XADD is equal or smaller than the target stream top item"));
+                        }
+
+                        if last_offset_id == offset_id
                             && last_offset_seq >= offset_seq
-                            && !has_wildcard)
-                    {
-                        return Ok(Protocol::err("ERR The ID specified in XADD is equal or smaller than the target stream top item"));
+                            && has_wildcard
+                        {
+                            offset_seq = last_offset_seq + 1;
+                        }
                     }
 
-                    if last_offset_id == offset_id && last_offset_seq >= offset_seq && has_wildcard
-                    {
-                        offset_seq = last_offset_seq + 1;
+                    let offset = format!("{}-{}", offset_id, offset_seq);
+
+                    let s = stream.entry(offset.clone()).or_insert_with(Vec::new);
+                    for (key, value) in kvps {
+                        s.push((key.clone(), value.clone()));
                     }
-                }
-
-                let offset = format!("{}-{}", offset_id, offset_seq);
-
-                let s = stream.entry(offset.clone()).or_insert_with(Vec::new);
-                for (key, value) in kvps {
-                    s.push((key.clone(), value.clone()));
                 }
                 // println!("after xadd: {:?}", streams);
-                Ok(Protocol::BulkString(offset))
+                resp_and_replicate(server, Protocol::BulkString(offset), protocol, is_rep_con)
+                    .await?
             }
             Cmd::Xrange(stream_key, start, end) => {
                 let streams = server.streams.lock().await;
@@ -389,6 +338,29 @@ impl Cmd {
         }
         ret
     }
+}
+
+async fn resp_and_replicate(
+    server: &mut Server,
+    resp: Protocol,
+    replication: Protocol,
+    is_rep_con: bool,
+) -> Result<Result<Protocol, DBError>, DBError> {
+    Ok(if server.is_master() {
+        server
+            .master_repl_clients
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .send_command(replication)
+            .await?;
+        Ok(Protocol::ok())
+    } else if !is_rep_con {
+        Ok(Protocol::write_on_slave_err())
+    } else {
+        Ok(resp)
+    })
 }
 
 fn split_offset(offset: &str) -> (u64, u64, bool) {
