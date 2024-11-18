@@ -37,3 +37,8 @@ impl From<mpsc::error::SendError<(Protocol, u64)>> for DBError {
         DBError(item.to_string().clone())
     }
 }
+impl From<tokio::sync::mpsc::error::SendError<()>> for DBError {
+    fn from(item: mpsc::error::SendError<()>) -> Self {
+        DBError(item.to_string().clone())
+    }
+}

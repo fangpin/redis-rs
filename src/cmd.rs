@@ -1,4 +1,6 @@
-use std::{collections::BTreeMap, ops::Bound, u64};
+use std::{collections::BTreeMap, ops::Bound, time::Duration, u64};
+
+use tokio::sync::mpsc;
 
 use crate::{error::DBError, protocol::Protocol, server::Server, storage::now_in_millis};
 
@@ -19,7 +21,7 @@ pub enum Cmd {
     Type(String),
     Xadd(String, String, Vec<(String, String)>),
     Xrange(String, String, String),
-    Xread(Vec<String>, Vec<String>),
+    Xread(Vec<String>, Vec<String>, Option<u64>),
 }
 
 impl Cmd {
@@ -28,7 +30,7 @@ impl Cmd {
         match protocol.clone().0 {
             Protocol::Array(p) => {
                 let cmd = p.into_iter().map(|x| x.decode()).collect::<Vec<_>>();
-                if cmd.len() == 0 {
+                if cmd.is_empty() {
                     return Err(DBError("cmd length is 0".to_string()));
                 }
                 Ok((
@@ -114,9 +116,20 @@ impl Cmd {
                             if cmd.len() < 4 || cmd.len() % 2 != 0 {
                                 return Err(DBError(format!("unsupported cmd {:?}", cmd)));
                             }
-                            let cmd2 = &cmd[2..];
+                            let mut offset = 2;
+                            // block cmd
+                            let mut block = None;
+                            if cmd[1] == "block" {
+                                offset += 2;
+                                if let Ok(block_time) = cmd[2].parse() {
+                                    block = Some(block_time);
+                                } else {
+                                    return Err(DBError(format!("unsupported cmd {:?}", cmd)));
+                                }
+                            }
+                            let cmd2 = &cmd[offset..];
                             let len2 = cmd2.len() / 2;
-                            Cmd::Xread(cmd2[0..len2].to_vec(), cmd2[len2..].to_vec())
+                            Cmd::Xread(cmd2[0..len2].to_vec(), cmd2[len2..].to_vec(), block)
                         }
                         _ => return Err(DBError(format!("unsupported cmd {:?}", cmd[0]))),
                     },
@@ -165,7 +178,9 @@ impl Cmd {
             }
 
             Cmd::Xrange(stream_key, start, end) => xrange_cmd(server, stream_key, start, end).await,
-            Cmd::Xread(stream_keys, starts) => xread_cmd(starts, server, stream_keys).await,
+            Cmd::Xread(stream_keys, starts, block) => {
+                xread_cmd(starts, server, stream_keys, block).await
+            }
         };
         if ret.is_ok() {
             server.offset.fetch_add(
@@ -217,7 +232,23 @@ async fn xread_cmd(
     starts: &[String],
     server: &mut Server,
     stream_keys: &[String],
+    block_millis: &Option<u64>,
 ) -> Result<Protocol, DBError> {
+    if let Some(t) = block_millis {
+        if t > &0 {
+            tokio::time::sleep(Duration::from_millis(*t)).await;
+        } else {
+            let (sender, mut receiver) = mpsc::channel(4);
+            {
+                let mut blocker = server.stream_reader_blocker.lock().await;
+                blocker.push(sender.clone());
+            }
+            while let Some(_) = receiver.recv().await {
+                println!("get new xadd cmd, release block");
+                break;
+            }
+        }
+    }
     let streams = server.streams.lock().await;
     let mut ret = Vec::new();
     for (i, stream_key) in stream_keys.iter().enumerate() {
@@ -343,6 +374,13 @@ async fn xadd_cmd(
         for (key, value) in kvps {
             s.push((key.clone(), value.clone()));
         }
+    }
+    {
+        let mut blocker = server.stream_reader_blocker.lock().await;
+        for sender in blocker.iter() {
+            sender.send(()).await?;
+        }
+        blocker.clear();
     }
     resp_and_replicate(
         server,

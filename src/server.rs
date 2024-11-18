@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 
 use crate::cmd::Cmd;
@@ -26,6 +27,7 @@ pub struct Server {
     pub option: options::DBOption,
     pub offset: Arc<AtomicU64>,
     pub master_repl_clients: Arc<Mutex<Option<MasterReplicationClient>>>,
+    pub stream_reader_blocker: Arc<Mutex<Vec<Sender<()>>>>,
     master_addr: Option<String>,
 }
 
@@ -55,6 +57,7 @@ impl Server {
                 Arc::new(Mutex::new(None))
             },
             offset: Arc::new(AtomicU64::new(0)),
+            stream_reader_blocker: Arc::new(Mutex::new(Vec::new())),
             master_addr,
         };
 
