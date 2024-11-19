@@ -22,6 +22,8 @@ pub enum Cmd {
     Xadd(String, String, Vec<(String, String)>),
     Xrange(String, String, String),
     Xread(Vec<String>, Vec<String>, Option<u64>),
+    Incr(String),
+    Multi,
 }
 
 impl Cmd {
@@ -131,6 +133,18 @@ impl Cmd {
                             let len2 = cmd2.len() / 2;
                             Cmd::Xread(cmd2[0..len2].to_vec(), cmd2[len2..].to_vec(), block)
                         }
+                        "incr" => {
+                            if cmd.len() != 2 {
+                                return Err(DBError(format!("upspported cmd {:?}", cmd)));
+                            }
+                            Cmd::Incr(cmd[1].clone())
+                        }
+                        "multi" => {
+                            if cmd.len() != 1 {
+                                return Err(DBError(format!("upspported cmd {:?}", cmd)));
+                            }
+                            Cmd::Multi
+                        }
                         _ => return Err(DBError(format!("unsupported cmd {:?}", cmd[0]))),
                     },
                     protocol.0,
@@ -181,6 +195,8 @@ impl Cmd {
             Cmd::Xread(stream_keys, starts, block) => {
                 xread_cmd(starts, server, stream_keys, block).await
             }
+            Cmd::Incr(key) => incr_cmd(server, key).await,
+            Cmd::Multi => Ok(Protocol::SimpleString("ok".to_string())),
         };
         if ret.is_ok() {
             server.offset.fetch_add(
@@ -189,6 +205,21 @@ impl Cmd {
             );
         }
         ret
+    }
+}
+
+async fn incr_cmd(server: &mut Server, key: &String) -> Result<Protocol, DBError> {
+    let mut storage = server.storage.lock().await;
+    let v = storage.get(key);
+    // return 1 if key is missing
+    let v = v.map_or("1".to_string(), |v| v);
+
+    if let Ok(x) = v.parse::<u64>() {
+        let v = (x + 1).to_string();
+        storage.set(key.clone(), v.clone());
+        Ok(Protocol::SimpleString(v))
+    } else {
+        Ok(Protocol::err("ERR value is not an integer or out of range"))
     }
 }
 

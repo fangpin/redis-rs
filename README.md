@@ -33,20 +33,23 @@ cargo run -- --dir /some/db/path --dbfilename dump.rdb --port 6380 --replicaof "
 
 ## Supported Commands
 ```sh
+# basic commands
 redis-cli PING
 redis-cli ECHO hey
 redis-cli SET foo bar
 redis-cli SET foo bar px/ex 100
 redis-cli GET foo
-
-redis-cli CONFIG GET dbfilename
+redis-cli SET foo 2
+redis-cli INCR foo
+redis-cli INCR missing_key
+redis-cli TYPE some_key
 redis-cli KEYS "*"
 
+# leader-follower replication related commands
+redis-cli CONFIG GET dbfilename
 redis-cli INFO replication
 
-redis-cli TYPE some_key
-
-# streams
+# streams related commands
 redis-cli XADD stream_key 1526919030474-0 temperature 36 humidity 95
 redis-cli XADD stream_key 1526919030474-* temperature 37 humidity 94
 redis-cli XADD stream_key "*" foo bar
@@ -58,6 +61,13 @@ redis-cli XRANGE some_key - 1526985054079
 redis-cli XREAD streams some_key 1526985054069-0
 ## query multiple stream using xread
 redis-cli XREAD streams stream_key other_stream_key 0-0 0-1
+## blocking reads without timeout
+redis-cli XREAD block 0 streams some_key 1526985054069-0
+
+
+# transactions related commands
+## start a transaction
+redis-cli MULTI
 
 ```
 
