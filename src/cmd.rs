@@ -24,6 +24,7 @@ pub enum Cmd {
     Xread(Vec<String>, Vec<String>, Option<u64>),
     Incr(String),
     Multi,
+    Exec,
 }
 
 impl Cmd {
@@ -145,6 +146,12 @@ impl Cmd {
                             }
                             Cmd::Multi
                         }
+                        "exec" => {
+                            if cmd.len() != 1 {
+                                return Err(DBError(format!("unsupported cmd {:?}", cmd)));
+                            }
+                            Cmd::Exec
+                        }
                         _ => return Err(DBError(format!("unsupported cmd {:?}", cmd[0]))),
                     },
                     protocol.0,
@@ -197,6 +204,7 @@ impl Cmd {
             }
             Cmd::Incr(key) => incr_cmd(server, key).await,
             Cmd::Multi => Ok(Protocol::SimpleString("ok".to_string())),
+            Cmd::Exec => Ok(Protocol::err("ERR EXEC without MULTI")),
         };
         if ret.is_ok() {
             server.offset.fetch_add(
