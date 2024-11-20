@@ -1,7 +1,7 @@
 # Build Your Own Redis in Rust
 
 This project is to build a toy Redis-Server clone that's capable of parsing Redis protocol and handling basic Redis commands, parsing and initializing Redis from RDB file,
-supporting leader-follower replication, redis streams.
+supporting leader-follower replication, redis streams (queue), redis batch commands in transaction.
 
 You can find all the source code and commit history in [my github repo](https://github.com/fangpin/redis-rs).
 
@@ -264,3 +264,4 @@ Examples of Redis stream use cases include:
 ## Transaction
 When *MULTI* command is called in a connection, redis just queued all following commands until *EXEC* or *DISCARD* command is called.
 *EXEC* command will execute all queued commands and return an array representation of all execution result (including), instead the *DISCARD* command just clear all queued commands.
+The transactions among each client connection are independent.
