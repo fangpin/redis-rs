@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 
 use crate::{error::DBError, protocol::Protocol, server::Server, storage::now_in_millis};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Cmd {
     Ping,
     Echo(String),
@@ -25,6 +25,7 @@ pub enum Cmd {
     Incr(String),
     Multi,
     Exec,
+    Unknow,
 }
 
 impl Cmd {
@@ -46,8 +47,10 @@ impl Cmd {
                                 Cmd::SetPx(cmd[1].clone(), cmd[2].clone(), cmd[4].parse().unwrap())
                             } else if cmd.len() == 5 && cmd[3] == "ex" {
                                 Cmd::SetEx(cmd[1].clone(), cmd[2].clone(), cmd[4].parse().unwrap())
-                            } else {
+                            } else if cmd.len() == 3 {
                                 Cmd::Set(cmd[1].clone(), cmd[2].clone())
+                            } else {
+                                return Err(DBError(format!("unsupported cmd {:?}", cmd)));
                             }
                         }
                         "config" => {
@@ -136,13 +139,13 @@ impl Cmd {
                         }
                         "incr" => {
                             if cmd.len() != 2 {
-                                return Err(DBError(format!("upspported cmd {:?}", cmd)));
+                                return Err(DBError(format!("unsupported cmd {:?}", cmd)));
                             }
                             Cmd::Incr(cmd[1].clone())
                         }
                         "multi" => {
                             if cmd.len() != 1 {
-                                return Err(DBError(format!("upspported cmd {:?}", cmd)));
+                                return Err(DBError(format!("unsupported cmd {:?}", cmd)));
                             }
                             Cmd::Multi
                         }
@@ -152,7 +155,7 @@ impl Cmd {
                             }
                             Cmd::Exec
                         }
-                        _ => return Err(DBError(format!("unsupported cmd {:?}", cmd[0]))),
+                        _ => Cmd::Unknow,
                     },
                     protocol.0,
                 ))
@@ -169,9 +172,17 @@ impl Cmd {
         server: &mut Server,
         protocol: Protocol,
         is_rep_con: bool,
+        queued_cmd: &mut Option<Vec<(Cmd, Protocol)>>,
     ) -> Result<Protocol, DBError> {
         // return if the command is a write command
         let p = protocol.clone();
+        if queued_cmd.is_some() && !matches!(self, Cmd::Exec) && !matches!(self, Cmd::Multi) {
+            queued_cmd
+                .as_mut()
+                .unwrap()
+                .push((self.clone(), protocol.clone()));
+            return Ok(Protocol::SimpleString("QUEUED".to_string()));
+        }
         let ret = match self {
             Cmd::Ping => Ok(Protocol::SimpleString("PONG".to_string())),
             Cmd::Echo(s) => Ok(Protocol::SimpleString(s.clone())),
@@ -203,8 +214,12 @@ impl Cmd {
                 xread_cmd(starts, server, stream_keys, block).await
             }
             Cmd::Incr(key) => incr_cmd(server, key).await,
-            Cmd::Multi => Ok(Protocol::SimpleString("ok".to_string())),
-            Cmd::Exec => Ok(Protocol::err("ERR EXEC without MULTI")),
+            Cmd::Multi => {
+                *queued_cmd = Some(Vec::<(Cmd, Protocol)>::new());
+                Ok(Protocol::SimpleString("ok".to_string()))
+            }
+            Cmd::Exec => exec_cmd(queued_cmd, server, is_rep_con).await?,
+            Cmd::Unknow => Ok(Protocol::err("unknow cmd")),
         };
         if ret.is_ok() {
             server.offset.fetch_add(
@@ -214,6 +229,25 @@ impl Cmd {
         }
         ret
     }
+}
+
+async fn exec_cmd(
+    queued_cmd: &mut Option<Vec<(Cmd, Protocol)>>,
+    server: &mut Server,
+    is_rep_con: bool,
+) -> Result<Result<Protocol, DBError>, DBError> {
+    print!("queued cmd {:?}", queued_cmd);
+    Ok(if queued_cmd.is_some() {
+        let mut vec = Vec::new();
+        for (cmd, protocol) in queued_cmd.as_ref().unwrap() {
+            let res = Box::pin(cmd.run(server, protocol.clone(), is_rep_con, &mut None)).await?;
+            vec.push(res);
+        }
+        *queued_cmd = None;
+        Ok(Protocol::Array(vec))
+    } else {
+        Ok(Protocol::err("ERR EXEC without MULTI"))
+    })
 }
 
 async fn incr_cmd(server: &mut Server, key: &String) -> Result<Protocol, DBError> {
@@ -284,7 +318,7 @@ async fn xread_cmd(
             }
             while let Some(_) = receiver.recv().await {
                 println!("get new xadd cmd, release block");
-                break;
+                // break;
             }
         }
     }
@@ -455,14 +489,14 @@ fn psync_cmd(server: &mut Server) -> Result<Protocol, DBError> {
 
 async fn del_cmd(
     server: &mut Server,
-    k: &String,
+    k: &str,
     protocol: Protocol,
     is_rep_con: bool,
 ) -> Result<Protocol, DBError> {
     // offset
     let _ = {
         let mut s = server.storage.lock().await;
-        s.del(k.clone());
+        s.del(k.to_string());
         server
             .offset
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -472,8 +506,8 @@ async fn del_cmd(
 
 async fn set_ex_cmd(
     server: &mut Server,
-    k: &String,
-    v: &String,
+    k: &str,
+    v: &str,
     x: &u128,
     protocol: Protocol,
     is_rep_con: bool,
@@ -481,7 +515,7 @@ async fn set_ex_cmd(
     // offset
     let _ = {
         let mut s = server.storage.lock().await;
-        s.setx(k.clone(), v.clone(), *x * 1000);
+        s.setx(k.to_string(), v.to_string(), *x * 1000);
         server
             .offset
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -491,8 +525,8 @@ async fn set_ex_cmd(
 
 async fn set_px_cmd(
     server: &mut Server,
-    k: &String,
-    v: &String,
+    k: &str,
+    v: &str,
     x: &u128,
     protocol: Protocol,
     is_rep_con: bool,
@@ -500,7 +534,7 @@ async fn set_px_cmd(
     // offset
     let _ = {
         let mut s = server.storage.lock().await;
-        s.setx(k.clone(), v.clone(), *x);
+        s.setx(k.to_string(), v.to_string(), *x);
         server
             .offset
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -510,15 +544,15 @@ async fn set_px_cmd(
 
 async fn set_cmd(
     server: &mut Server,
-    k: &String,
-    v: &String,
+    k: &str,
+    v: &str,
     protocol: Protocol,
     is_rep_con: bool,
 ) -> Result<Protocol, DBError> {
     // offset
     let _ = {
         let mut s = server.storage.lock().await;
-        s.set(k.clone(), v.clone());
+        s.set(k.to_string(), v.to_string());
         server
             .offset
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -527,7 +561,7 @@ async fn set_cmd(
     resp_and_replicate(server, Protocol::ok(), protocol, is_rep_con).await
 }
 
-async fn get_cmd(server: &mut Server, k: &String) -> Result<Protocol, DBError> {
+async fn get_cmd(server: &mut Server, k: &str) -> Result<Protocol, DBError> {
     let v = {
         let mut s = server.storage.lock().await;
         s.get(k)

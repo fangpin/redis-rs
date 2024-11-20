@@ -1,3 +1,5 @@
+use core::fmt;
+
 use crate::error::DBError;
 
 #[derive(Debug, Clone)]
@@ -6,6 +8,12 @@ pub enum Protocol {
     BulkString(String),
     Null,
     Array(Vec<Protocol>),
+}
+
+impl fmt::Display for Protocol {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.decode().as_str())
+    }
 }
 
 impl Protocol {
@@ -58,30 +66,22 @@ impl Protocol {
         Self::SimpleString("none".to_string())
     }
 
-    pub fn decode(self: &Self) -> String {
+    pub fn decode(&self) -> String {
         match self {
             Protocol::SimpleString(s) => s.to_string(),
             Protocol::BulkString(s) => s.to_string(),
             Protocol::Null => "".to_string(),
-            Protocol::Array(s) => s
-                .into_iter()
-                .map(|x| x.decode())
-                .collect::<Vec<_>>()
-                .join(" "),
+            Protocol::Array(s) => s.iter().map(|x| x.decode()).collect::<Vec<_>>().join(" "),
         }
     }
 
-    pub fn to_string(self: &Self) -> String {
-        self.decode()
-    }
-
-    pub fn encode(self: &Self) -> String {
+    pub fn encode(&self) -> String {
         match self {
             Protocol::SimpleString(s) => format!("+{}\r\n", s),
             Protocol::BulkString(s) => format!("${}\r\n{}\r\n", s.len(), s),
             Protocol::Array(ss) => {
                 format!("*{}\r\n", ss.len())
-                    + ss.into_iter()
+                    + ss.iter()
                         .map(|x| x.encode())
                         .collect::<Vec<_>>()
                         .join("")

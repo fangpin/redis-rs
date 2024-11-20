@@ -13,6 +13,7 @@ use tokio::sync::Mutex;
 use crate::cmd::Cmd;
 use crate::error::DBError;
 use crate::options;
+use crate::protocol::Protocol;
 use crate::rdb;
 use crate::replication_client::FollowerReplicationClient;
 use crate::replication_client::MasterReplicationClient;
@@ -103,6 +104,7 @@ impl Server {
         is_rep_conn: bool,
     ) -> Result<(), DBError> {
         let mut buf = [0; 512];
+        let mut queued_cmd: Option<Vec<(Cmd, Protocol)>> = None;
         loop {
             if let Ok(len) = stream.read(&mut buf).await {
                 if len == 0 {
@@ -110,10 +112,15 @@ impl Server {
                     return Ok(());
                 }
                 let s = str::from_utf8(&buf[..len])?;
-                let (cmd, protocol) = Cmd::from(s)?;
+                let (cmd, protocol) =
+                    Cmd::from(s).unwrap_or((Cmd::Unknow, Protocol::err("unknow cmd")));
                 println!("got command: {:?}, protocol: {:?}", cmd, protocol);
 
-                let res = cmd.run(self, protocol, is_rep_conn).await?;
+                let res = cmd
+                    .run(self, protocol, is_rep_conn, &mut queued_cmd)
+                    .await
+                    .unwrap_or(Protocol::err("unknow cmd"));
+                print!("queued 2 cmd {:?}", queued_cmd);
 
                 // only send response to normal client, do not send response to replication client
                 if !is_rep_conn {
