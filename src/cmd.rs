@@ -26,6 +26,7 @@ pub enum Cmd {
     Multi,
     Exec,
     Unknow,
+    Discard,
 }
 
 impl Cmd {
@@ -155,6 +156,7 @@ impl Cmd {
                             }
                             Cmd::Exec
                         }
+                        "discard" => Cmd::Discard,
                         _ => Cmd::Unknow,
                     },
                     protocol.0,
@@ -176,7 +178,11 @@ impl Cmd {
     ) -> Result<Protocol, DBError> {
         // return if the command is a write command
         let p = protocol.clone();
-        if queued_cmd.is_some() && !matches!(self, Cmd::Exec) && !matches!(self, Cmd::Multi) {
+        if queued_cmd.is_some()
+            && !matches!(self, Cmd::Exec)
+            && !matches!(self, Cmd::Multi)
+            && !matches!(self, Cmd::Discard)
+        {
             queued_cmd
                 .as_mut()
                 .unwrap()
@@ -218,7 +224,15 @@ impl Cmd {
                 *queued_cmd = Some(Vec::<(Cmd, Protocol)>::new());
                 Ok(Protocol::SimpleString("ok".to_string()))
             }
-            Cmd::Exec => exec_cmd(queued_cmd, server, is_rep_con).await?,
+            Cmd::Exec => exec_cmd(queued_cmd, server, is_rep_con).await,
+            Cmd::Discard => {
+                if queued_cmd.is_some() {
+                    *queued_cmd = None;
+                    Ok(Protocol::SimpleString("ok".to_string()))
+                } else {
+                    Ok(Protocol::err("ERR Discard without MULTI"))
+                }
+            }
             Cmd::Unknow => Ok(Protocol::err("unknow cmd")),
         };
         if ret.is_ok() {
@@ -235,9 +249,8 @@ async fn exec_cmd(
     queued_cmd: &mut Option<Vec<(Cmd, Protocol)>>,
     server: &mut Server,
     is_rep_con: bool,
-) -> Result<Result<Protocol, DBError>, DBError> {
-    print!("queued cmd {:?}", queued_cmd);
-    Ok(if queued_cmd.is_some() {
+) -> Result<Protocol, DBError> {
+    if queued_cmd.is_some() {
         let mut vec = Vec::new();
         for (cmd, protocol) in queued_cmd.as_ref().unwrap() {
             let res = Box::pin(cmd.run(server, protocol.clone(), is_rep_con, &mut None)).await?;
@@ -247,7 +260,7 @@ async fn exec_cmd(
         Ok(Protocol::Array(vec))
     } else {
         Ok(Protocol::err("ERR EXEC without MULTI"))
-    })
+    }
 }
 
 async fn incr_cmd(server: &mut Server, key: &String) -> Result<Protocol, DBError> {
