@@ -66,8 +66,18 @@ redis-cli XREAD block 0 streams some_key 1526985054069-0
 
 
 # transactions related commands
-## start a transaction
-redis-cli MULTI
+## start a transaction and exec all queued commands in a transaction
+redis-cli
+> MULTI
+> set foo 1
+> incr foo
+> exec
+## start a transaction and queued commands and cancel transaction then
+redis-cli
+> MULTI
+> set foo 1
+> incr foo
+> discard
 
 ```
 
@@ -250,3 +260,7 @@ Examples of Redis stream use cases include:
 - Event sourcing (e.g., tracking user actions, clicks, etc.)
 - Sensor monitoring (e.g., readings from devices in the field)
 - Notifications (e.g., storing a record of each user's notifications in a separate stream)
+
+## Transaction
+When *MULTI* command is called in a connection, redis just queued all following commands until *EXEC* or *DISCARD* command is called.
+*EXEC* command will execute all queued commands and return an array representation of all execution result (including), instead the *DISCARD* command just clear all queued commands.
