@@ -1,10 +1,14 @@
 ---
 title: 概览
 layout: default
-nav_order: 1
+nav_exclude: true
+permalink: /overview/
 ---
 
 # 概览
+
+[返回首页]({{ '/' | relative_url }}) | [文档总览]({{ '/zh/docs/overview/' | relative_url }}) | [运行时与服务端]({{ '/zh/docs/server-runtime/' | relative_url }}) | [RESP 协议]({{ '/zh/docs/resp-protocol/' | relative_url }})
+
 旨在从 0 到 1 实现一个基础的 redis-server 版本。其包含：
 
 - 解析标准的 Redis 协议；
@@ -35,6 +39,17 @@ nav_order: 1
   - 相信 Rust 光明的前景
 
 # 主要章节
+以下章节按源码边界拆分，适合作为从首页继续深入的阅读路线：
+
+- [文档总览]({{ '/zh/docs/overview/' | relative_url }})
+- [运行时与服务端]({{ '/zh/docs/server-runtime/' | relative_url }})
+- [RESP 协议]({{ '/zh/docs/resp-protocol/' | relative_url }})
+- [存储模型]({{ '/zh/docs/storage-model/' | relative_url }})
+- [RDB 解析器]({{ '/zh/docs/rdb-parser/' | relative_url }})
+- [复制链路]({{ '/zh/docs/replication-flow/' | relative_url }})
+- [命令执行]({{ '/zh/docs/command-execution/' | relative_url }})
+- [Streams 与事务]({{ '/zh/docs/streams-and-transactions/' | relative_url }})
+
 持续更新中，皆是会对一下章节附上索引链接
 
 基础功能：

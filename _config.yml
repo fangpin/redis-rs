@@ -1,11 +1,15 @@
 title: 从 0 到 1 由 Rust 构建 Redis
 description: 从 0 到 1 由 Rust 构建 Redis
 theme: just-the-docs
+color_scheme: redis-rs
 
-url: https://fangpin.github.io/redis-rs
+url: https://fangpin.github.io
 
 aux_links:
-  GitHub: https://fangpin.github.io/redis-rs
+  GitHub: https://github.com/fangpin/redis-rs
+
+exclude:
+  - docs/superpowers/
 
 # logo: "/assets/images/just-the-docs.png"
 

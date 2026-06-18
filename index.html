@@ -1,0 +1,310 @@
+---
+title: redis-rs
+permalink: /
+---
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>redis-rs | Build Your Own Redis in Rust</title>
+    <meta
+      name="description"
+      content="A Redis clone in Rust with RESP parsing, RDB loading, replication, streams, and transactions."
+      data-i18n-content="meta.description"
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Manrope:wght@400;500;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="{{ '/assets/css/homepage.css' | relative_url }}" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero" id="top">
+        <nav class="topbar" aria-label="Primary">
+          <a class="brand" href="#top">redis-rs</a>
+          <div class="topbar-actions">
+            <a
+              class="text-link"
+              href="{{ '/docs/overview/' | relative_url }}"
+              data-i18n="nav.overview"
+              data-i18n-href="nav.overviewHref"
+            >Detailed Docs</a>
+            <a class="text-link" href="https://github.com/fangpin/redis-rs" target="_blank" rel="noreferrer" data-i18n="nav.github">GitHub</a>
+            <div
+              class="language-toggle"
+              role="group"
+              aria-label="Language switcher"
+              data-i18n-aria-label="meta.languageSwitcher"
+            >
+              <button class="lang-btn is-active" type="button" data-lang="en" aria-pressed="true">EN</button>
+              <button class="lang-btn" type="button" data-lang="zh" aria-pressed="false">中文</button>
+            </div>
+          </div>
+        </nav>
+
+        <section class="hero-content">
+          <div class="hero-copy">
+            <p class="eyebrow" data-i18n="hero.eyebrow">Protocol. Persistence. Replication.</p>
+            <h1 data-i18n="hero.title">Build Your Own Redis in Rust</h1>
+            <p class="hero-description" data-i18n="hero.description">
+              A toy Redis server in Rust that parses RESP, restores from RDB, replicates leader-follower state, supports streams, and queues transactional commands.
+            </p>
+            <div class="hero-actions">
+              <a class="button button-primary" href="https://github.com/fangpin/redis-rs" target="_blank" rel="noreferrer" data-i18n="hero.primaryCta">View on GitHub</a>
+              <a class="button button-secondary" href="#quickstart" data-i18n="hero.secondaryCta">Quick Start</a>
+              <a
+                class="button button-secondary"
+                href="{{ '/docs/overview/' | relative_url }}"
+                data-i18n="hero.docsCta"
+                data-i18n-href="hero.docsHref"
+              >Detailed Docs</a>
+            </div>
+          </div>
+
+          <div class="hero-panel" aria-hidden="true">
+            <div class="panel-surface">
+              <div class="panel-header">
+                <span>runtime.signal</span>
+                <span>redis-rs</span>
+              </div>
+              <div class="panel-grid">
+                <div class="metric">
+                  <span class="metric-label" data-i18n="metrics.protocol">Protocol</span>
+                  <strong>RESP</strong>
+                </div>
+                <div class="metric">
+                  <span class="metric-label" data-i18n="metrics.persistence">Persistence</span>
+                  <strong>RDB</strong>
+                </div>
+                <div class="metric">
+                  <span class="metric-label" data-i18n="metrics.replication">Replication</span>
+                  <strong>PSYNC</strong>
+                </div>
+                <div class="metric">
+                  <span class="metric-label" data-i18n="metrics.streams">Queues</span>
+                  <strong>XREAD</strong>
+                </div>
+              </div>
+              <pre class="signal-code"><code>cargo run -- --dir ./db --dbfilename dump.rdb
+redis-cli PING
+redis-cli INFO replication
+redis-cli XADD stream_key "*" foo bar</code></pre>
+            </div>
+          </div>
+        </section>
+
+        <section class="docs-entry-section" id="docs-entry">
+          <div class="docs-entry-header">
+            <div>
+              <p class="eyebrow" data-i18n="docsEntry.eyebrow">Implementation docs</p>
+              <h2 data-i18n="docsEntry.title">Go straight to the detailed implementation docs</h2>
+            </div>
+            <a
+              class="button button-primary docs-entry-button"
+              href="{{ '/docs/overview/' | relative_url }}"
+              data-i18n="docsEntry.primaryCta"
+              data-i18n-href="docsEntry.primaryHref"
+            >Docs overview</a>
+          </div>
+          <div class="docs-link-grid">
+            <a
+              class="docs-link-card"
+              href="{{ '/docs/server-runtime/' | relative_url }}"
+              data-i18n-href="docsEntry.runtime.href"
+            >
+              <span class="docs-link-kicker" data-i18n="docsEntry.runtime.kicker">Runtime</span>
+              <strong data-i18n="docsEntry.runtime.title">Server runtime</strong>
+              <span class="docs-link-copy" data-i18n="docsEntry.runtime.body">Process entry, configuration, listener lifecycle, and shared server state.</span>
+            </a>
+            <a
+              class="docs-link-card"
+              href="{{ '/docs/resp-protocol/' | relative_url }}"
+              data-i18n-href="docsEntry.protocol.href"
+            >
+              <span class="docs-link-kicker" data-i18n="docsEntry.protocol.kicker">Protocol</span>
+              <strong data-i18n="docsEntry.protocol.title">RESP and storage</strong>
+              <span class="docs-link-copy" data-i18n="docsEntry.protocol.body">Wire format, parser, string storage, expiry, and stream containers.</span>
+            </a>
+            <a
+              class="docs-link-card"
+              href="{{ '/docs/replication-flow/' | relative_url }}"
+              data-i18n-href="docsEntry.replication.href"
+            >
+              <span class="docs-link-kicker" data-i18n="docsEntry.replication.kicker">Sync</span>
+              <strong data-i18n="docsEntry.replication.title">RDB and replication</strong>
+              <span class="docs-link-copy" data-i18n="docsEntry.replication.body">Snapshot parsing, handshake flow, full sync, and replica fan-out.</span>
+            </a>
+            <a
+              class="docs-link-card"
+              href="{{ '/docs/command-execution/' | relative_url }}"
+              data-i18n-href="docsEntry.commands.href"
+            >
+              <span class="docs-link-kicker" data-i18n="docsEntry.commands.kicker">Behavior</span>
+              <strong data-i18n="docsEntry.commands.title">Commands and transactions</strong>
+              <span class="docs-link-copy" data-i18n="docsEntry.commands.body">Dispatch, stream semantics, transaction replay, and the full chapter map.</span>
+            </a>
+          </div>
+        </section>
+      </header>
+
+      <main>
+        <section class="section capability-section" id="capabilities">
+          <div class="section-heading">
+            <p class="eyebrow" data-i18n="capabilities.eyebrow">Core capabilities</p>
+            <h2 data-i18n="capabilities.title">Built around real Redis subsystems</h2>
+          </div>
+          <div class="capability-grid">
+            <article class="capability-card">
+              <p class="card-kicker">01</p>
+              <h3 data-i18n="capabilities.protocol.title">Protocol</h3>
+              <p data-i18n="capabilities.protocol.body">Parses Redis protocol messages and routes commands through the server runtime.</p>
+              <span class="chip">protocol.rs</span>
+            </article>
+            <article class="capability-card">
+              <p class="card-kicker">02</p>
+              <h3 data-i18n="capabilities.persistence.title">Persistence</h3>
+              <p data-i18n="capabilities.persistence.body">Loads database state from RDB files and restores key metadata.</p>
+              <span class="chip">rdb.rs</span>
+            </article>
+            <article class="capability-card">
+              <p class="card-kicker">03</p>
+              <h3 data-i18n="capabilities.replication.title">Replication</h3>
+              <p data-i18n="capabilities.replication.body">Bootstraps replica handshake, full sync, and replicated write flow.</p>
+              <span class="chip">replication_client.rs</span>
+            </article>
+            <article class="capability-card">
+              <p class="card-kicker">04</p>
+              <h3 data-i18n="capabilities.streams.title">Streams and transactions</h3>
+              <p data-i18n="capabilities.streams.body">Supports stream operations and queued transactional execution patterns.</p>
+              <span class="chip">cmd.rs</span>
+            </article>
+          </div>
+        </section>
+
+        <section class="section quickstart-section" id="quickstart">
+          <div class="section-heading">
+            <p class="eyebrow" data-i18n="quickstart.eyebrow">Run it</p>
+            <h2 data-i18n="quickstart.title">Start fast, then probe with redis-cli</h2>
+          </div>
+          <div class="command-deck">
+            <div class="command-card">
+              <div class="command-label" data-i18n="quickstart.masterLabel">Master</div>
+              <pre><code>cargo run -- --dir /some/db/path --dbfilename dump.rdb</code></pre>
+            </div>
+            <div class="command-card">
+              <div class="command-label" data-i18n="quickstart.replicaLabel">Replica</div>
+              <pre><code>cargo run -- --dir /some/db/path --dbfilename dump.rdb --port 6380 --replicaof "localhost 6379"</code></pre>
+            </div>
+            <div class="command-card command-card-wide">
+              <div class="command-label" data-i18n="quickstart.probeLabel">Probe</div>
+              <pre><code>redis-cli PING
+redis-cli SET foo bar
+redis-cli INFO replication
+redis-cli XREAD block 0 streams some_key 1526985054069-0</code></pre>
+            </div>
+          </div>
+        </section>
+
+        <section class="section architecture-section" id="architecture">
+          <div class="section-heading">
+            <p class="eyebrow" data-i18n="architecture.eyebrow">Implementation map</p>
+            <h2 data-i18n="architecture.title">How the runtime is assembled</h2>
+          </div>
+          <div class="architecture-strip">
+            <article class="architecture-node">
+              <span class="node-file">protocol.rs</span>
+              <h3 data-i18n="architecture.protocol.title">Protocol ingestion</h3>
+              <p data-i18n="architecture.protocol.body">RESP parsing and request framing for incoming client and replication traffic.</p>
+            </article>
+            <article class="architecture-node">
+              <span class="node-file">server.rs + cmd.rs</span>
+              <h3 data-i18n="architecture.command.title">Command routing</h3>
+              <p data-i18n="architecture.command.body">Connection handling, command dispatch, and transaction orchestration.</p>
+            </article>
+            <article class="architecture-node">
+              <span class="node-file">storage.rs + rdb.rs</span>
+              <h3 data-i18n="architecture.storage.title">State and restore</h3>
+              <p data-i18n="architecture.storage.body">In-memory storage backed by RDB parsing and initial database hydration.</p>
+            </article>
+            <article class="architecture-node">
+              <span class="node-file">replication_client.rs</span>
+              <h3 data-i18n="architecture.replication.title">Replication flow</h3>
+              <p data-i18n="architecture.replication.body">Replica-side handshake, sync start, and downstream command consumption.</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="section docs-section" id="docs">
+          <div class="section-heading">
+            <p class="eyebrow" data-i18n="docs.eyebrow">Implementation docs</p>
+            <h2 data-i18n="docs.title">Follow the code by subsystem</h2>
+          </div>
+          <div class="capability-grid">
+            <article class="capability-card">
+              <p class="card-kicker">A</p>
+              <h3 data-i18n="docs.runtime.title">Server runtime</h3>
+              <p data-i18n="docs.runtime.body">Process entry, configuration, listener lifecycle, and shared server state.</p>
+              <a
+                class="inline-link"
+                href="{{ '/docs/server-runtime/' | relative_url }}"
+                data-i18n="docs.openChapter"
+                data-i18n-href="docs.runtime.href"
+              >Open chapter</a>
+            </article>
+            <article class="capability-card">
+              <p class="card-kicker">B</p>
+              <h3 data-i18n="docs.persistence.title">RESP and storage</h3>
+              <p data-i18n="docs.persistence.body">RESP parsing and encoding, string storage, expiry model, and stream containers.</p>
+              <a
+                class="inline-link"
+                href="{{ '/docs/resp-protocol/' | relative_url }}"
+                data-i18n="docs.openChapter"
+                data-i18n-href="docs.persistence.href"
+              >Open chapter</a>
+            </article>
+            <article class="capability-card">
+              <p class="card-kicker">C</p>
+              <h3 data-i18n="docs.commands.title">Persistence and replication</h3>
+              <p data-i18n="docs.commands.body">RDB parser internals, handshake flow, full sync, and replica fan-out.</p>
+              <a
+                class="inline-link"
+                href="{{ '/docs/replication-flow/' | relative_url }}"
+                data-i18n="docs.openChapter"
+                data-i18n-href="docs.commands.href"
+              >Open chapter</a>
+            </article>
+            <article class="capability-card">
+              <p class="card-kicker">D</p>
+              <h3 data-i18n="docs.overview.title">Command surface</h3>
+              <p data-i18n="docs.overview.body">Command dispatch, stream semantics, transaction replay, and the full chapter map.</p>
+              <a
+                class="inline-link"
+                href="{{ '/docs/overview/' | relative_url }}"
+                data-i18n="docs.openOverview"
+                data-i18n-href="docs.overview.href"
+              >Open overview</a>
+            </article>
+          </div>
+        </section>
+      </main>
+
+      <footer class="section footer-cta">
+        <div>
+          <p class="eyebrow" data-i18n="footer.eyebrow">Source and docs</p>
+          <h2 data-i18n="footer.title">Inspect the code, then dive deeper</h2>
+        </div>
+        <div class="footer-actions">
+          <a class="button button-primary" href="https://github.com/fangpin/redis-rs" target="_blank" rel="noreferrer" data-i18n="footer.github">Open GitHub Repository</a>
+          <a class="button button-secondary" href="https://github.com/fangpin/redis-rs/blob/master/README.md" target="_blank" rel="noreferrer" data-i18n="footer.readmeEn">Read README</a>
+          <a class="button button-secondary" href="https://github.com/fangpin/redis-rs/blob/master/README_CN.md" target="_blank" rel="noreferrer" data-i18n="footer.readmeZh">Read Chinese README</a>
+        </div>
+      </footer>
+    </div>
+
+    <script src="{{ '/assets/js/homepage.js' | relative_url }}"></script>
+  </body>
+</html>
