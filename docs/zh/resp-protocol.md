@@ -1,118 +1,133 @@
 ---
 title: RESP 协议
 layout: default
-nav_exclude: true
+nav_order: 4
 permalink: /zh/docs/resp-protocol/
 ---
 
 # RESP 协议
 
-[返回首页]({{ '/' | relative_url }}) | [文档总览]({{ '/zh/docs/overview/' | relative_url }}) | [运行时与服务端]({{ '/zh/docs/server-runtime/' | relative_url }}) | [命令执行]({{ '/zh/docs/command-execution/' | relative_url }})
-
-这一章单独讨论项目里的 RESP 模型，以及它如何把 socket 输入和命令执行连接起来。
+这一章单独看负责 socket、命令解析和响应编码之间转换的 wire-format 适配层。
 
 ## 文件边界
 
 - `src/protocol.rs`
 
-## 协议枚举
+## 为什么这个模块是中枢
 
-项目内部使用 `Protocol` 作为统一协议表示，当前支持：
+后面的其他模块基本都默认“已经有一个解析好的 `Protocol` 对象了”。
+
+最重要的使用方包括：
+
+- `Cmd::from(...)`，把顶层 RESP array 变成 typed command
+- `Protocol::encode(...)`，把命令执行结果重新编码成返回字节
+- 复制辅助函数，它们会用 `from_vec(...)` 和 `ok()` 直接构造小的 RESP 消息
+
+所以 `src/protocol.rs` 既是入站解析器，也是出站序列化器。
+
+## 内部协议模型
+
+当前枚举非常小：
 
 - `SimpleString(String)`
 - `BulkString(String)`
 - `Null`
 - `Array(Vec<Protocol>)`
 
-这已经足够覆盖当前仓库的命令输入和响应输出。
+没有单独的 `Error`、`Integer`，也没有二进制安全的 blob 变体。
 
-## 为什么这一层重要
+这个设计让实现很短，但也会带来几个直接后果：
 
-项目里几乎所有模块都建立在 `Protocol` 之上：
+- 错误回复是按 simple string 编码的
+- 看起来像整数的值一般也是按字符串处理
+- 由于内部模型完全是字符串，payload 保真度有限
 
-- `Cmd::from(...)` 依赖它来判断收到的是哪条命令
-- `Protocol::encode(...)` 负责把执行结果重新变成 RESP 文本
+## 解析契约
 
-所以它既是入站适配层，也是出站适配层。
+`Protocol::from(protocol: &str)` 是顶层入口。
 
-## 解析入口
+它的契约是：
 
-`Protocol::from(protocol: &str)` 是总入口。
+- 看首字节
+- 分发到不同 suffix parser
+- 返回 `(Protocol, consumed_len)`
 
-它会检查首字符，并分发到三个后缀解析器：
+这里的 consumed length 不是附带信息，而是数组递归解析成立的关键。
+
+当前分发到：
 
 - `parse_simple_string_sfx(...)`
 - `parse_bulk_string_sfx(...)`
 - `parse_array_sfx(...)`
 
-返回值是一个二元组：
+遇到不支持的前缀就立刻失败。
 
-- 解析后的 `Protocol`
-- 消耗掉的字节长度
+## `parse_simple_string_sfx(...)`
 
-第二个值对于数组递归解析尤其重要。
+这是文件里最小的 parser。
 
-## Simple String
+它会：
 
-`parse_simple_string_sfx(...)` 会找到第一个 `\\r\\n`，并把之前的内容作为 `SimpleString`。
+1. 找第一个 `\r\n`
+2. 取前面的内容
+3. 返回 `SimpleString(...)`
+4. 把分隔符也计入 consumed length
 
-这一支最简单：
+除了分隔符查找之外，没有做额外结构校验。
 
-- 没有长度前缀
-- 没有嵌套结构
-- 直接切片取值
+## `parse_bulk_string_sfx(...)`
 
-## Bulk String
+bulk string 是两段式解析。
 
-`parse_bulk_string_sfx(...)` 分两步：
+第一段：
 
-1. 先解析前面的长度声明
-2. 再取出对应长度的 payload，并校验实际长度是否匹配
+- 先读出第一个 `\r\n` 之前的十进制长度
 
-如果声明长度和实际内容长度不匹配，就直接报错，不做容错恢复。
+第二段：
 
-## 一个很重要的行为：会强制转小写
+- 读取后面的 payload，直到下一个 `\r\n`
+- 校验实际字符串长度是否和声明长度一致
 
-bulk string 被接受后，当前实现会保存成：
+如果长度不匹配，会直接返回错误，不尝试恢复。
+
+## 一个需要明确写出来的当前行为：payload 会被转成小写
+
+bulk string 解析成功后，当前实现会存成：
 
 ```rust
 Protocol::BulkString(s.to_lowercase())
 ```
 
-这有利有弊。
+这样做的好处是命令匹配很简单，因为 `Cmd::from(...)` 可以默认所有 token 都是小写。
 
-好处：
+但代价也很明显：
 
-- 命令关键字天然大小写不敏感
+- 命令名会变成大小写不敏感
+- key 会被转小写
+- value 也会被转小写
+- 从外部客户端读进来的命令，在复制链路里也不再是字节级原样转发
 
-代价：
+比如 `SET Foo Bar` 进入命令层时，已经是一组小写 token 了。
 
-- bulk string 的原始大小写不会被保留
-- payload 不再是完全按字节保真的
+这不是文档措辞问题，而是当前实现里的真实 shortcut。
 
-对于教学项目这是可接受的，但它确实和完整 Redis 行为不完全一致。
+## `parse_array_sfx(...)`
 
-## 数组解析
+数组解析是 `(Protocol, consumed_len)` 这个设计真正发挥作用的地方。
 
-`parse_array_sfx(...)` 会先读数组长度，再循环调用 `Protocol::from(...)` 去解析后续子元素。
+控制流是：
 
-每个子元素都会返回“自己消耗了多少字节”，父解析器就用 `offset` 持续向前推进。
+1. 解析数组长度前缀
+2. 用 `offset` 游标跳过 header
+3. 对剩余字符串调用 `Protocol::from(&s[offset..])`
+4. 用子解析器返回的 consumed length 推进 `offset`
+5. 收集成 `Protocol::Array`
 
-数据流可以概括成：
+它在结构上支持递归，但前提仍然是整个输入已经以一个完整 `&str` 的形式拿到了。
 
-```text
-array header
--> child 1 parse + len
--> child 2 parse + len
--> ...
--> Protocol::Array(vec)
-```
+## 其他模块会用到的构造辅助函数
 
-这也是为什么顶层解析函数必须返回“值 + 消耗长度”。
-
-## 构造辅助函数
-
-`protocol.rs` 还提供了一些命令层常用的 helper：
+这个文件还暴露了一些 helper：
 
 - `from_vec(...)`
 - `ok()`
@@ -121,36 +136,90 @@ array header
 - `psync_on_slave_err()`
 - `none()`
 
-这样 `cmd.rs` 不需要在每个分支里手写小段 RESP 结构。
+这些 helper 很重要，因为上层经常需要构造 RESP 返回值，而不想每次都手写数组和字符串拼接。
 
-## 编码路径
+其中两个尤其能看出语义：
 
-`encode()` 负责把 `Protocol` 转回 RESP 文本：
+- `from_vec(...)` 用 bulk string 构造数组，但不会把输入统一转小写
+- `err(...)` 返回的是 `SimpleString`，不是单独的 RESP error 类型
 
-- `SimpleString` -> `+...\\r\\n`
-- `BulkString` -> `$len\\r\\npayload\\r\\n`
-- `Array` -> `*len\\r\\n` + 子元素编码结果
-- `Null` -> `$-1\\r\\n`
+所以“内部直接构造出来的消息”和“外部请求解析出来的消息”语义并不完全一致。
 
-这套编码路径被多个地方复用：
+## `decode()`
+
+`decode()` 会把 `Protocol` 压平成普通字符串。
+
+规则是：
+
+- `SimpleString` -> 内部字符串
+- `BulkString` -> 内部字符串
+- `Null` -> `""`
+- `Array` -> 子元素字符串用空格拼接
+
+`Cmd::from(...)` 很依赖这个方法，因为它要把 RESP array 变成命令 token 列表。
+
+这很实用，但也意味着它不是一个无损的结构化视图。嵌套数组会被压平成空格连接的文本。
+
+## `encode()`
+
+`encode()` 做反方向的序列化。
+
+当前映射规则：
+
+- `SimpleString` -> `+...\r\n`
+- `BulkString` -> `$len\r\npayload\r\n`
+- `Array` -> `*len\r\n` 加上所有子元素编码
+- `Null` -> `$-1\r\n`
+
+同一个编码器会被复用在：
 
 - 普通客户端响应
-- 复制握手消息
-- 向 replica 广播写命令
+- 复制握手响应
+- 向副本广播命令
 
-## 人类可读的 `decode()`
+## 端到端数据流
 
-`decode()` 会把 `Protocol` 展平成普通字符串。
+普通命令的 wire-format 路径是：
 
-命令解析阶段大量依赖它，尤其是把数组转成 token 列表时。
+```text
+socket text
+-> Protocol::from
+-> Cmd::from
+-> command handler result as Protocol
+-> Protocol::encode
+-> socket write
+```
 
-对数组来说，它会把子元素用空格拼接起来。这非常适合当前仓库的命令式解析需求，但并不是完全保结构的展示形式。
+而内部构造的复制消息通常是：
+
+```text
+helper constructor such as Protocol::from_vec
+-> Protocol::encode
+-> socket write
+```
+
+这个差异很重要，因为后者绕过了“解析时统一小写”这个行为。
+
+## 错误面
+
+解析错误会以 `DBError` 的形式向上返回。
+
+而命令语义层的很多错误，后面会被表达成 `Protocol::err("...")`，它最终仍然编码成 simple string。
+
+所以这里实际存在两层失败：
+
+- parser / builder 失败 -> Rust error
+- 命令 / 运行时失败 -> string reply
+
+当前模块并没有把完整 RESP 错误语义单独建模出来。
 
 ## 当前实现限制
 
-- 解析输入是 `&str`，不是原始字节流
-- 没有更细的 RESP 类型区分
-- 结构上支持嵌套数组，但命令层只消费很窄的一部分
-- bulk string 强制小写会改变 payload 语义
+- parser 输入是 `&str`，不是原始字节流
+- parser 假设完整 frame 已经一次性在内存里
+- bulk string 在解析时会被转成小写
+- `decode()` 会把数组压平成命令友好的字符串
+- 错误回复用的是 `SimpleString`
+- 枚举没有单独建模 integer 或 binary-safe blob
 
-尽管如此，这一层依然是整个项目最关键的 wire-format 边界。
+协议层虽然小，但如果理解了这里的取舍，后面命令执行和复制链路里很多看起来奇怪的行为就会顺很多。

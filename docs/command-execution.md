@@ -7,7 +7,7 @@ permalink: /docs/command-execution/
 
 # Command Execution
 
-This chapter focuses on how parsed protocol values become typed commands and how those commands dispatch into concrete behaviors.
+This chapter covers how parsed RESP values become typed commands and how those commands dispatch into concrete behavior.
 
 ## File boundaries
 
@@ -15,47 +15,80 @@ This chapter focuses on how parsed protocol values become typed commands and how
 - `src/server.rs`
 - `src/protocol.rs`
 
-## Why `cmd.rs` is the center of behavior
+## Why `cmd.rs` is the semantic center
 
-`src/cmd.rs` is the largest behavior module in the repo. It is where:
+`src/cmd.rs` is where several ownership boundaries meet:
 
-- protocol arrays become command enums
+- parsed protocol arrays become typed commands
 - command handlers are dispatched
 - write commands intersect with replication
-- streams and transactions attach themselves to the normal command path
+- stream commands share the normal command path
+- transactions queue and replay commands
 
-If `server.rs` is the runtime shell, `cmd.rs` is the semantic heart of the server.
+If `server.rs` is the runtime shell, `cmd.rs` is the module that gives the server meaning.
 
-## Command enum
+## `Cmd` enum
 
-`Cmd` is a typed summary of the supported command surface.
+The `Cmd` enum is the typed summary of the supported command surface.
 
-It currently includes:
+It includes:
 
-- string commands such as `GET`, `SET`, `DEL`, `INCR`
-- inspection commands such as `CONFIG GET`, `INFO`, `TYPE`
-- replication commands such as `REPLCONF`, `PSYNC`
-- stream commands such as `XADD`, `XRANGE`, `XREAD`
-- transaction commands such as `MULTI`, `EXEC`, `DISCARD`
+- basic commands: `Ping`, `Echo`
+- string commands: `Get`, `Set`, `SetPx`, `SetEx`, `Del`, `Incr`
+- introspection commands: `Keys`, `ConfigGet`, `Info`, `Type`
+- replication commands: `Replconf`, `Psync`
+- stream commands: `Xadd`, `Xrange`, `Xread`
+- transaction commands: `Multi`, `Exec`, `Discard`
+- fallback: `Unknow`
 
-Unknown inputs fall into `Unknow`.
+The misspelling in `Unknow` is part of the current source and is reflected in later fallback behavior.
 
-## Parsing path
+## `Cmd::from(...)`
 
-`Cmd::from(...)` starts from a parsed `Protocol` and expects the top-level shape to be an array.
+`Cmd::from(...)` receives raw RESP text, not a pre-parsed protocol object.
 
-The control flow is:
+Its control flow is:
 
-1. call `Protocol::from(...)`
-2. ensure the top-level value is `Protocol::Array`
-3. decode each child into a flat token vector
-4. match on the first token
+1. call `Protocol::from(s)`
+2. require the top-level value to be `Protocol::Array`
+3. call `decode()` on every child to build a flat token vector
+4. match on `cmd[0]`
 5. validate argument count and shape for each supported command
-6. return `(Cmd, Protocol)`
+6. return `(Cmd, original_protocol)`
 
-Returning the original `Protocol` together with the typed command is important because replication later needs the exact command payload again.
+Returning both values is an important design choice:
 
-## Dispatch path
+- `Cmd` drives semantic dispatch
+- `Protocol` is reused later for replication fan-out and offset accounting
+
+## Why lowercasing in the protocol layer matters here
+
+Because `Protocol::parse_bulk_string_sfx(...)` lowercases bulk-string payloads, `Cmd::from(...)` effectively operates on lowercase tokens.
+
+That simplifies pattern matching:
+
+- `"set"` instead of handling mixed case
+- `"px"` and `"ex"` are easy to compare
+
+But it also means data values reach command handlers lowercased too.
+
+That is a protocol-layer shortcut with command-layer consequences.
+
+## Parsing by command family
+
+`Cmd::from(...)` uses a narrow, explicit parser for each supported command family.
+
+Examples:
+
+- `set` distinguishes plain, `px`, and `ex` forms by argument count and token position
+- `config` only supports `config get <name>`
+- `keys` only supports `keys *`
+- `xadd` collects field/value pairs starting at index `3`
+- `xread` optionally parses `block <millis>` before splitting stream keys and offsets
+
+Unsupported argument shapes return `DBError` immediately instead of being deferred to the handler.
+
+## `Cmd::run(...)`
 
 `Cmd::run(...)` is the central dispatcher.
 
@@ -66,73 +99,145 @@ Its inputs are:
 - `is_rep_con`
 - `queued_cmd`
 
-Its output is always `Result<Protocol, DBError>`.
+Its output is `Result<Protocol, DBError>`.
 
-The dispatch table sends each command to a focused helper such as:
+The dispatch table sends each variant to a focused helper such as:
 
 - `get_cmd(...)`
 - `set_cmd(...)`
-- `keys_cmd(...)`
+- `config_get_cmd(...)`
 - `info_cmd(...)`
+- `replconf_cmd(...)`
 - `xadd_cmd(...)`
+- `xread_cmd(...)`
 - `exec_cmd(...)`
 
-That keeps parsing, orchestration, and individual command semantics separate.
+That is the module's main structural win. Parsing and per-command behavior stay separated.
 
-## Shared write helper
+## Transaction-aware queueing in `run(...)`
 
-Several write commands end in `resp_and_replicate(...)`.
+Before dispatching, `run(...)` checks whether the current connection already has a transaction queue.
 
-That helper decides:
+If `queued_cmd` is present and the incoming command is not `EXEC`, `MULTI`, or `DISCARD`, the function:
 
-- what local response should be returned
-- whether the command should be forwarded to registered replicas
-- whether a slave should reject the write
+1. pushes `(self.clone(), protocol.clone())` into the queue
+2. returns `QUEUED`
 
-This is a useful design choice because replication rules are not duplicated across every write handler.
+So transaction queueing happens before normal handler execution.
 
-## Introspection commands
+This is why queued commands do not mutate storage immediately.
 
-`config_get_cmd(...)` and `info_cmd(...)` expose parts of the runtime configuration and replication state.
+## String command helpers
 
-These commands do not touch storage directly. They serialize fields from `server.option` into `Protocol` values.
+The basic string helpers are thin wrappers over `Storage`.
 
-That gives the repo a lightweight self-description surface without adding separate metadata layers.
+Examples:
 
-## Keys and type inspection
+- `get_cmd(...)` -> `storage.get(...)`
+- `set_cmd(...)` -> `storage.set(...)`
+- `set_px_cmd(...)` -> `storage.setx(..., px_millis)`
+- `set_ex_cmd(...)` -> `storage.setx(..., seconds * 1000)`
+- `del_cmd(...)` -> `storage.del(...)`
 
-`keys_cmd(...)` simply returns the current keys from string storage.
+The command layer owns argument interpretation and reply shape. The storage layer only owns point operations.
 
-`type_cmd(...)` checks both containers:
+## Introspection helpers
 
-1. string storage
-2. stream map
+`config_get_cmd(...)` reads directly from `server.option`.
 
-and returns `string`, `stream`, or `none`.
+Only two names are supported:
 
-That small helper is one of the places where the repo's split between normal storage and streams becomes visible to clients.
+- `dir`
+- `dbfilename`
 
-## Incr path
+`info_cmd(...)` only supports the `replication` section and renders a small text blob out of `server.option.replication`.
 
-`incr_cmd(...)` reads the current string value, defaults missing keys to `1`, parses the value as `u64`, increments it, then stores the result back as a string.
+That means `INFO replication` is configuration-oriented, not a fully live runtime report.
 
-If parsing fails, it returns an explicit Redis-style error message.
+## `type_cmd(...)`
 
-This is a compact example of how command helpers sit above the string-only storage model rather than replacing it.
+`type_cmd(...)` makes the split state model visible to clients.
+
+Its control flow is:
+
+1. lock string storage and try `get(...)`
+2. if found, return `string`
+3. otherwise lock streams and probe `server.streams`
+4. if found, return `stream`
+5. otherwise return `none`
+
+This command is a small but useful map of the repo's two-container design.
+
+## `replconf_cmd(...)` and `psync_cmd(...)`
+
+`replconf_cmd(...)` is intentionally shallow.
+
+- `getack` -> build `REPLCONF ACK <offset>` from `server.offset`
+- everything else -> `OK`
+
+So `REPLCONF listening-port ...` and `REPLCONF capa psync2` are accepted without argument-level validation in the command layer.
+
+`psync_cmd(...)` is also narrow:
+
+- master -> `FULLRESYNC <master_replid> 0`
+- slave -> `PSYNC ON SLAVE IS NOT ALLOWED`
+
+The socket-mode transition is handled later in `Server::handle(...)`, not here.
+
+## Shared write policy: `resp_and_replicate(...)`
+
+Several write helpers end by calling `resp_and_replicate(...)`.
+
+That helper centralizes role policy:
+
+- on a master, send the original command to downstream replicas and return the local response
+- on a slave receiving a normal client request, reject the write
+- on a slave replaying data from the master, accept the write
+
+This removes duplicated role checks from `SET`, `DEL`, and `XADD`.
+
+## A notable exception: `INCR`
+
+`incr_cmd(...)` reads, parses, increments, and writes a string value locally.
+
+Unlike `SET`, `DEL`, or `XADD`, it does **not** end in `resp_and_replicate(...)`.
+
+So in the current implementation:
+
+- `INCR` mutates local storage
+- `INCR` is not propagated to downstream replicas
+- `INCR` is not rejected on a slave normal-client connection through the shared write guard
+
+That is a current behavior gap worth documenting directly.
 
 ## Offset accounting
 
-After a successful command, `Cmd::run(...)` increments `server.offset` by the encoded length of the original protocol payload.
+After any successful command, `Cmd::run(...)` increments `server.offset` by `p.encode().len()`.
 
-That means offset accounting is attached to command completion, not socket read position.
+But some write helpers also manually increment the same counter by `1` inside the helper body.
 
-It is a crude model, but it is consistent across the command layer.
+That means offset tracking is not a single consistent accounting rule today. Some writes effectively advance the counter twice for one logical command.
+
+## Unknown commands
+
+Unsupported top-level command names become `Cmd::Unknow`.
+
+Later, `run(...)` maps that branch to `Protocol::err("unknow cmd")`.
+
+So the system distinguishes:
+
+- malformed supported commands -> `DBError`
+- unknown command names -> fallback reply
+
+That split is slightly uneven, but it matches the current code.
 
 ## Current implementation limits
 
-- command parsing assumes fully decoded arrays
-- unsupported shapes error out early
-- many handlers still unwrap or assume well-formed values
-- unknown commands collapse into one generic branch
+- command parsing assumes one fully decoded top-level RESP array
+- payload lowercasing happens before command parsing
+- some helpers rely on narrow argument-shape assumptions
+- `INCR` bypasses the shared replication/write-guard helper
+- offset accounting is inconsistent across helpers
+- unknown commands collapse into one generic reply shape
 
-Even with those limits, `cmd.rs` does a good job showing the command-oriented structure of a Redis-like server.
+`cmd.rs` is still the best single file to read after `server.rs`, because it exposes where the repo chooses directness over abstraction.

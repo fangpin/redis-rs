@@ -1,15 +1,13 @@
 ---
-title: 复制链路
+title: 主从复制链路
 layout: default
-nav_exclude: true
+nav_order: 7
 permalink: /zh/docs/replication-flow/
 ---
 
-# 复制链路
+# 主从复制链路
 
-[返回首页]({{ '/' | relative_url }}) | [文档总览]({{ '/zh/docs/overview/' | relative_url }}) | [运行时与服务端]({{ '/zh/docs/server-runtime/' | relative_url }}) | [RDB 解析器]({{ '/zh/docs/rdb-parser/' | relative_url }})
-
-这一章专门讲 master/slave 之间如何建立关系、传输快照，以及后续如何广播写命令。
+这一章沿着 follower 如何连上 master、如何接收初始化 snapshot，以及后续如何继续消费复制命令来展开。
 
 ## 文件边界
 
@@ -18,120 +16,191 @@ permalink: /zh/docs/replication-flow/
 - `src/server.rs`
 - `src/cmd.rs`
 
-## Slave 启动链路
+## 复制是由启动流程驱动的
 
-slave 的复制启动过程是显式写在 `main.rs` 里的。
+当前没有一个单独的 replication service 在后台统一协调所有事。
 
-顺序如下：
+follower 复制是在 `main.rs` 里，`Server` 创建完成后立刻显式启动的。
 
-1. 构造 `Server`
-2. 创建 `FollowerReplicationClient`
-3. `ping_master()`
-4. `report_port(...)`
-5. `report_sync_protocol()`
-6. `start_psync(...)`
-7. 再为复制 socket 启动一个 `Server::handle(...)`
+启动顺序是：
 
-所以复制控制流并没有被藏起来，入口处就能看见。
+```text
+Server::new(...)
+-> get_follower_repl_client(...)
+-> ping_master()
+-> report_port(...)
+-> report_sync_protocol()
+-> start_psync(...)
+-> spawn Server::handle(replication_stream, true)
+```
 
-## Follower 侧握手
+好处是：整个 bootstrap 在二进制入口附近就能一眼看到。
 
-`FollowerReplicationClient` 会在一条 `TcpStream` 上按顺序发送：
+## follower 侧客户端对象
+
+`src/replication_client.rs` 里定义了 `FollowerReplicationClient`。
+
+它只有一个核心字段：
+
+- `stream: TcpStream`
+
+这一个 socket 会被复用于：
+
+- 握手命令
+- snapshot 传输
+- 后续 master 的实时命令回放
+
+所以“初始化复制”和“稳定态复制”当前是共用一个 TCP 连接的。
+
+## 握手步骤
+
+follower 会按固定顺序发四条消息：
 
 1. `PING`
 2. `REPLCONF listening-port <port>`
 3. `REPLCONF capa psync2`
 4. `PSYNC ? -1`
 
-每一步都会通过 `check_resp(...)` 校验返回值是否匹配预期。
+`ping_master(...)`、`report_port(...)`、`report_sync_protocol(...)` 都会：
 
-## `PSYNC` 之后会读什么
+- 构造 RESP array
+- 写到 socket
+- 调 `check_resp(...)`
 
-`start_psync(...)` 发完命令后，立即进入 `recv_rdb_file(...)`。
+`check_resp(...)` 当前做的是“按字节精确比较预期 simple string 响应”。
 
-这里期待的输入是：
+这很直观，但也意味着它假设整个响应能在一次读取里完整拿到。
 
-1. 一行类似 `FULLRESYNC <id> <offset>` 的信息
-2. 一个 `$<len>` 形式的快照长度头
-3. 真正的 RDB 二进制快照内容
+## follower 侧的 `PSYNC`
 
-快照内容不会走另一套解析逻辑，而是直接复用 `rdb::parse_rdb(...)`。
+`start_psync(...)` 会先写出 `PSYNC ? -1`，然后立刻进入 `recv_rdb_file(...)`。
 
-## Master 侧如何处理 `PSYNC`
+所以从 follower 视角看，`PSYNC` 的含义是：
 
-master 对 `PSYNC` 的处理跨了两个层次：
+1. 请求全量同步
+2. 解析 master 返回的 `FULLRESYNC` 行
+3. 消费后续的 RDB payload
+4. 让 socket 继续留在可接收实时复制命令的位置上
 
-- `Cmd::from(...)` 把它识别成 `Cmd::Psync`
-- `Server::handle(...)` 在命令执行后对这个 socket 做特殊处理
+## `recv_rdb_file(...)`
 
-`Server::handle(...)` 中的分支是复制模式切换的关键：
+`recv_rdb_file(...)` 会先把 socket 包成 `BufReader`，然后依次读取：
 
-1. 调 `send_rdb_file(...)`
-2. 调 `add_stream(...)`
-3. 跳出普通请求循环
+1. 一行以 `\r\n` 结尾的复制元信息
+2. 一行 `$<len>\r\n` 形式的 RDB 长度头
+3. RDB 正文，并把解析工作交给 `rdb::parse_rdb(...)`
 
-从这一刻起，这个 socket 就是一个已注册的 replica 下游。
+第一行当前要求恰好能拆成三个 token，比如：
 
-## 为什么 Master 行为不全写在 `cmd.rs`
+```text
+FULLRESYNC <replid> <offset>
+```
 
-`PSYNC` 既是：
+这里有个值得写清楚的点：虽然代码读出了 `rdb_file_len` 并打印日志，但后面并没有用这个长度去限制 snapshot 的读取边界，而是依赖 `rdb::parse_rdb(...)` 自己在字节流中遇到 `EOF`。
 
-- 一条逻辑命令
-- 一次连接模式切换
+## master 侧的 `PSYNC`
 
-后者必须在 `server.rs` 里做，因为服务端需要接管并保存这个 replica socket 以便后续 fan-out。
+在 master 上，`PSYNC` 是跨两个模块完成的。
 
-所以当前实现故意把控制流拆成两层：
+`cmd.rs` 负责命令语义：
 
-- 命令语义 -> `psync_cmd(...)`
-- socket 生命周期切换 -> `Server::handle(...)`
+- `Cmd::from(...)` 识别 `psync`
+- `psync_cmd(...)` 在 master 上返回 `FULLRESYNC <master_replid> 0`
 
-## 快照数据从哪里来
+`server.rs` 负责 socket 状态切换：
 
-`MasterReplicationClient::send_rdb_file(...)` 当前发送的是一段常量十六进制编码的空 RDB 文件。
+1. `cmd.run(...)` 先生成 `FULLRESYNC` 响应
+2. `Server::handle(...)` 按普通请求先把这个响应写回去
+3. `handle(...)` 识别到命令是 `Cmd::Psync`
+4. `MasterReplicationClient::send_rdb_file(...)` 继续把 snapshot 写到 socket
+5. `MasterReplicationClient::add_stream(...)` 把这个 socket 注册进下游副本列表
+6. `handle(...)` 跳出普通连接循环
 
-这并不是对当前内存状态的真实序列化，只是为了让协议流程能继续跑通。
+这个拆分很关键，因为 `PSYNC` 不只是一个命令，它还会让连接的角色发生切换。
 
-这也是当前实现和真实 Redis 差距最大的点之一。
+## snapshot payload 的来源
 
-## 写命令如何广播
+`MasterReplicationClient::send_rdb_file(...)` 当前不会把内存里的实时状态序列化出来。
 
-一旦 replica socket 被注册，后续写命令就通过 `MasterReplicationClient::send_command(...)` 广播。
+它做的是把硬编码的十六进制常量 `EMPTY_RDB_FILE_HEX_STRING` 还原成字节，再发给 follower。
 
-它的逻辑很简单：
+所以当前全量同步的实际行为是：
 
-1. 锁住 replica socket 列表
-2. 遍历每个连接
-3. 把编码后的命令写出去
+- 发送一个有效但固定的空 snapshot 壳子
+- 后续写入再靠命令回放补齐
 
-没有做每个 replica 的背压或独立状态管理。
+这是和生产级 Redis 差距最明显的地方之一。
 
-## 命令执行如何接上复制
+## 下游副本注册
 
-`cmd.rs` 中的写命令最终会调用 `resp_and_replicate(...)`。
+`MasterReplicationClient` 会把副本 socket 保存在：
 
-它根据节点角色做分支：
+```text
+Arc<Mutex<Vec<TcpStream>>>
+```
 
-- master -> 先广播给 replicas，再返回本地响应
-- slave 的普通客户端连接 -> 拒绝写入
-- slave 的复制连接 -> 接受来自 master 的回放命令
+`add_stream(...)` 只是简单地把 socket push 进去。
 
-这就是命令语义和复制规则真正交汇的地方。
+这里没有独立的副本元数据结构去记录：
 
-## Offset 跟踪
+- 副本 ID
+- 健康状态
+- 最后 ACK offset
+- 背压状态
 
-`server.offset` 保存了一份粗粒度复制偏移量。
+master 当前只记“后面可以写哪些 socket”。
 
-命令执行成功后，会按协议编码长度去递增它；`REPLCONF GETACK` 则从这里读进度。
+## 命令 fan-out
 
-这不是完整 Redis 的复制状态机，但足够表达“当前节点已经处理了多少复制流量”。
+副本注册之后，写命令传播走的是 `send_command(...)`。
+
+控制流是：
+
+1. 锁住副本 socket 列表
+2. 遍历每个 socket
+3. 把 `protocol.encode()` 的结果写出去
+
+没有针对单个副本的重试、摘除或限流策略。
+
+## 复制策略与命令执行交汇的地方
+
+大部分写命令最终都会走到 `cmd.rs` 里的 `resp_and_replicate(...)`。
+
+这个 helper 统一处理角色规则：
+
+- master -> 广播给下游副本，再返回本地响应
+- slave 收到普通客户端写请求 -> 拒绝
+- slave 从复制连接收到回放命令 -> 接受
+
+这就是“复制语义”和“命令语义”真正交汇的地方。
+
+## offset 追踪
+
+当前仓库里其实有两套 offset 概念。
+
+实时共享计数器：
+
+- `server.offset`
+- 在 `Cmd::run(...)` 里更新
+- 某些写 helper 里也会手动额外加一次
+- `REPLCONF GETACK` 读取它
+
+静态配置字段：
+
+- `server.option.replication.master_repl_offset`
+- 在 `main.rs` 里初始化
+- `INFO replication` 返回它
+
+所以 `GETACK` 和 `INFO replication` 实际上并没有共享同一个实时来源。
 
 ## 当前实现限制
 
-- 快照来源是常量空 RDB
+- full sync 永远发固定的空 RDB payload
+- follower 不会按声明长度强约束 snapshot 读取边界
 - 不支持 partial resync
-- 没有 backlog 窗口
-- 没有 replica 存活状态管理
-- 除启动过程外，没有重连策略
+- 没有 backlog window
+- 启动后如果链路断开，没有自动重连循环
+- 副本 socket 只存在线，不带额外元数据
+- offset 汇报来源不一致
 
-即便如此，它已经清楚展示了 leader-follower 复制的核心骨架：握手、全量同步、注册 socket、再广播写流量。
+即使如此，这条复制链路仍然把最核心的教学形状展示出来了：显式握手、全量 snapshot 初始化、注册副本 socket，然后再做命令回放。

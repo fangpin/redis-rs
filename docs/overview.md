@@ -9,7 +9,15 @@ permalink: /docs/overview/
 
 [Homepage]({{ '/' | relative_url }}) | [Server Runtime]({{ '/docs/server-runtime/' | relative_url }}) | [RESP Protocol]({{ '/docs/resp-protocol/' | relative_url }}) | [Storage Model]({{ '/docs/storage-model/' | relative_url }})
 
-This docs area now maps `redis-rs` at module level instead of collapsing several ownership boundaries into three broad chapters.
+This docs area now maps `redis-rs` by implementation boundary instead of collapsing the codebase into a few broad summaries.
+
+Each main chapter is written to answer the same concrete questions:
+
+- which file owns this behavior
+- which function is the entrypoint
+- what happens first, next, and last
+- what data structure is being passed through
+- which shortcut or limitation matters if you extend the code
 
 ## Reading path
 
@@ -34,6 +42,7 @@ Use this sequence if you want to understand the implementation from the outside 
 - [Storage Model]({{ '/docs/storage-model/' | relative_url }})
   - `src/storage.rs`
   - `src/server.rs`
+  - `src/cmd.rs`
 - [RDB Parser]({{ '/docs/rdb-parser/' | relative_url }})
   - `src/rdb.rs`
 - [Replication Flow]({{ '/docs/replication-flow/' | relative_url }})
@@ -48,10 +57,11 @@ Use this sequence if you want to understand the implementation from the outside 
 - [Streams and Transactions]({{ '/docs/streams-and-transactions/' | relative_url }})
   - `src/cmd.rs`
   - `src/server.rs`
+  - `src/storage.rs`
 
-## Why this split
+## What changed from the earlier docs split
 
-The repository is compact, but the code still has more than three real implementation boundaries:
+The repository is compact, but it still has more than three real implementation boundaries:
 
 - entry/runtime orchestration
 - RESP parsing
@@ -61,4 +71,4 @@ The repository is compact, but the code still has more than three real implement
 - command dispatch
 - stream and transaction extensions
 
-Keeping those boundaries visible makes the docs much closer to the source tree and much better for code reading.
+The newer split keeps those boundaries visible and also documents current behavior accurately, including places where the implementation is intentionally narrower than production Redis.

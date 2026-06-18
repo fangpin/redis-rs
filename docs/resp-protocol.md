@@ -7,114 +7,127 @@ permalink: /docs/resp-protocol/
 
 # RESP Protocol
 
-This chapter isolates the project's RESP model from the rest of the server logic.
+This chapter isolates the wire-format adapter that sits between sockets, command parsing, and response encoding.
 
 ## File boundary
 
 - `src/protocol.rs`
 
-## Protocol enum
+## Why this module is central
 
-`Protocol` is the internal representation used between parsing, command execution, and socket output.
+The rest of the server assumes that a parsed `Protocol` value exists.
 
-The enum currently supports:
+Important consumers are:
+
+- `Cmd::from(...)`, which turns a top-level RESP array into a typed command
+- `Protocol::encode(...)`, which turns command results back into bytes
+- replication helpers, which construct small RESP messages through `from_vec(...)` and `ok()`
+
+So `src/protocol.rs` is both the inbound parser and the outbound serializer.
+
+## Internal protocol model
+
+The enum is intentionally small:
 
 - `SimpleString(String)`
 - `BulkString(String)`
 - `Null`
 - `Array(Vec<Protocol>)`
 
-That is enough for the current command set and response surface.
+There is no dedicated `Error`, `Integer`, or binary-safe blob variant.
 
-## Why this module matters
+That design choice keeps the implementation short, but it has visible consequences later:
 
-Everything else in the project assumes a parsed `Protocol` value exists.
+- error replies are encoded as simple strings
+- integer-like values are usually rendered as strings
+- payload fidelity is limited by the string-centric representation
 
-Two especially important boundaries depend on it:
-
-- `Cmd::from(...)` consumes parsed arrays to decide which command was requested
-- `Protocol::encode(...)` turns command results back into bytes for clients and replicas
-
-So this module is both the inbound and outbound wire-format adapter.
-
-## Parsing entrypoint
+## Parsing contract
 
 `Protocol::from(protocol: &str)` is the top-level parser.
 
-It inspects the first byte and dispatches to one of three suffix parsers:
+Its contract is:
+
+- inspect the first byte
+- dispatch to a suffix parser
+- return `(Protocol, consumed_len)`
+
+The consumed length is not incidental. It is what lets array parsing recurse through a single input buffer without reparsing from the beginning.
+
+Dispatch currently goes to:
 
 - `parse_simple_string_sfx(...)`
 - `parse_bulk_string_sfx(...)`
 - `parse_array_sfx(...)`
 
-It returns a pair:
+Unsupported prefixes fail immediately.
 
-- parsed `Protocol`
-- consumed byte length
+## `parse_simple_string_sfx(...)`
 
-That consumed length is what makes recursive array parsing possible.
+This parser is the smallest in the file.
 
-## Simple strings
+It:
 
-`parse_simple_string_sfx(...)` looks for the first `\\r\\n` pair and returns the bytes before it as a `SimpleString`.
+1. searches for the first `\r\n`
+2. takes the bytes before it
+3. returns `SimpleString(...)`
+4. reports the consumed length including the delimiter
 
-This is the simplest parser in the file:
+There is no extra validation beyond delimiter discovery.
 
-- no nested structure
-- no declared payload length
-- direct substring extraction
+## `parse_bulk_string_sfx(...)`
 
-## Bulk strings
+Bulk strings use a two-stage parse.
 
-`parse_bulk_string_sfx(...)` has two stages:
+Stage 1:
 
-1. parse the declared string length before the first `\\r\\n`
-2. parse the following payload and verify its actual length matches the declared length
+- read the decimal length prefix before the first `\r\n`
 
-If lengths disagree, the parser returns an error instead of trying to recover.
+Stage 2:
 
-## Important behavior: lowercasing payloads
+- read the following payload up to the next `\r\n`
+- verify that the actual string length matches the declared length
 
-When a bulk string is accepted, the implementation stores it as:
+If the lengths do not match, parsing fails instead of attempting recovery.
+
+## Important current behavior: payload lowercasing
+
+When a bulk string is accepted, the parser stores it as:
 
 ```rust
 Protocol::BulkString(s.to_lowercase())
 ```
 
-This has a practical benefit and a semantic cost.
+That is convenient for command matching because `Cmd::from(...)` can assume lowercase command tokens.
 
-Benefit:
+But it also changes semantics:
 
-- command matching becomes case-insensitive with no extra logic in `Cmd::from(...)`
+- command names become case-insensitive
+- keys are lowercased
+- values are lowercased
+- replicated external command payloads are not byte-exact copies of the original wire input
 
-Cost:
+For example, `SET Foo Bar` enters the command layer as lowercase tokens.
 
-- bulk string payloads do not preserve original casing
-- values are no longer byte-exact relative to the wire input
+This is a real implementation shortcut, not just a presentation detail.
 
-This is acceptable for the repo's learning focus, but it is a real difference from production Redis behavior.
+## `parse_array_sfx(...)`
 
-## Arrays
+Array parsing is where the `(Protocol, consumed_len)` contract pays off.
 
-`parse_array_sfx(...)` first reads the array length prefix, then repeatedly calls `Protocol::from(...)` on the remaining suffix.
+The control flow is:
 
-Each child parse returns its own consumed length, and the parser advances an `offset` cursor until all array elements have been parsed.
+1. parse the array length prefix
+2. move an `offset` cursor past the header
+3. call `Protocol::from(&s[offset..])` for each child
+4. advance `offset` by the child parser's consumed length
+5. collect all children into `Protocol::Array`
 
-The data flow is:
+The function is structurally recursive, but it still relies on the outer input being available as one contiguous `&str`.
 
-```text
-array header
--> child 1 parse + length
--> child 2 parse + length
--> ...
--> Protocol::Array(vec)
-```
+## Construction helpers used by other modules
 
-This is the only place where the length-returning parse API really pays off.
-
-## Construction helpers
-
-The file also exposes helpers used by higher layers:
+The file also exposes a few helper constructors:
 
 - `from_vec(...)`
 - `ok()`
@@ -123,38 +136,90 @@ The file also exposes helpers used by higher layers:
 - `psync_on_slave_err()`
 - `none()`
 
-These helpers keep command handlers from repeatedly rebuilding small RESP fragments by hand.
+These helpers are important because higher layers often need to build RESP replies without repeating manual array or string assembly.
 
-## Encoding path
+Two of them are especially revealing:
 
-`encode()` converts `Protocol` back into RESP text.
+- `from_vec(...)` constructs RESP arrays out of bulk strings and does not lowercase inputs
+- `err(...)` returns `SimpleString`, not a dedicated RESP error type
 
-The current mapping is:
+So internal helper-built messages and externally parsed messages do not have exactly the same semantics.
 
-- `SimpleString` -> `+...\\r\\n`
-- `BulkString` -> `$len\\r\\npayload\\r\\n`
-- `Array` -> `*len\\r\\n` followed by encoded children
-- `Null` -> `$-1\\r\\n`
-
-This makes the same structure reusable for:
-
-- client responses
-- replication handshake messages
-- write propagation to replicas
-
-## Human-readable decoding
+## `decode()`
 
 `decode()` flattens a `Protocol` value into a plain string.
 
-This is used heavily by command parsing, especially when turning a parsed array into a vector of command tokens.
+Mapping:
 
-For arrays, `decode()` joins child values with spaces. That is a convenient command-oriented representation, even though it is not a lossless structural rendering.
+- `SimpleString` -> inner string
+- `BulkString` -> inner string
+- `Null` -> `""`
+- `Array` -> child strings joined by spaces
+
+This is heavily used by `Cmd::from(...)` to turn a parsed array into command tokens.
+
+That is practical, but it is not a lossless structural view. Nested arrays become flattened space-joined text.
+
+## `encode()`
+
+`encode()` performs the reverse mapping back to RESP text.
+
+Current rules are:
+
+- `SimpleString` -> `+...\r\n`
+- `BulkString` -> `$len\r\npayload\r\n`
+- `Array` -> `*len\r\n` plus encoded children
+- `Null` -> `$-1\r\n`
+
+This single serializer is reused for:
+
+- ordinary client replies
+- replication handshake replies
+- command propagation to replicas
+
+## End-to-end data flow
+
+For a normal command, the wire-format path is:
+
+```text
+socket text
+-> Protocol::from
+-> Cmd::from
+-> command handler result as Protocol
+-> Protocol::encode
+-> socket write
+```
+
+For internally generated replication messages, the path is usually:
+
+```text
+helper constructor such as Protocol::from_vec
+-> Protocol::encode
+-> socket write
+```
+
+That difference matters because helper-generated data bypasses the lowercase-on-parse behavior.
+
+## Error surface
+
+Parsing errors return `DBError`.
+
+Semantic command errors are usually represented later as `Protocol::err("...")`, which still encodes to a RESP simple string.
+
+So there are really two layers of failure:
+
+- parser/build failures as Rust errors
+- command/runtime failures as string replies
+
+The module does not model the full RESP error vocabulary separately.
 
 ## Current implementation limits
 
-- parser input is a Rust `&str`, not raw bytes
-- null bulk strings beyond the explicit `Null` encoding are not modeled separately
-- nested arrays are supported structurally, but the command layer only expects a narrow subset
-- bulk string lowercasing changes payload semantics
+- parser input is `&str`, not raw bytes
+- the parser assumes a full frame is already available in memory
+- bulk strings are lowercased on parse
+- `decode()` flattens arrays into command-friendly text instead of preserving structure
+- error replies use `SimpleString`
+- the enum does not model integers or binary-safe blobs separately
 
-The module is intentionally small, but it is still the core wire-format hinge of the repo.
+The protocol layer is deliberately small, but it is still the hinge that explains several later behaviors that would otherwise look surprising in command execution and replication.

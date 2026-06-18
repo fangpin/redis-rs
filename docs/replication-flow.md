@@ -7,7 +7,7 @@ permalink: /docs/replication-flow/
 
 # Replication Flow
 
-This chapter focuses on how master and slave nodes establish a relationship and exchange state.
+This chapter follows how a follower connects to a master, receives the initial snapshot, and then starts consuming replicated commands.
 
 ## File boundaries
 
@@ -16,122 +16,191 @@ This chapter focuses on how master and slave nodes establish a relationship and 
 - `src/server.rs`
 - `src/cmd.rs`
 
-## Replica startup path
+## Replication is startup-driven
 
-Slave startup begins in `main.rs`, not inside a hidden background service.
+There is no separate replication service object coordinating everything in the background.
 
-The explicit sequence is:
+Follower replication begins explicitly in `main.rs` right after the `Server` is created.
 
-1. build `Server`
-2. create `FollowerReplicationClient`
-3. `ping_master()`
-4. `report_port(...)`
-5. `report_sync_protocol()`
-6. `start_psync(...)`
-7. spawn `Server::handle(...)` on the replication socket
+The startup sequence is:
 
-That makes replication easy to trace because the orchestration is all near the binary entrypoint.
+```text
+Server::new(...)
+-> get_follower_repl_client(...)
+-> ping_master()
+-> report_port(...)
+-> report_sync_protocol()
+-> start_psync(...)
+-> spawn Server::handle(replication_stream, true)
+```
 
-## Follower-side handshake
+This makes the full bootstrap visible at the binary entrypoint.
 
-`FollowerReplicationClient` drives the upstream handshake over a single `TcpStream`.
+## Follower-side client object
 
-The messages are:
+`src/replication_client.rs` defines `FollowerReplicationClient`.
+
+It owns one field:
+
+- `stream: TcpStream`
+
+That single socket is reused for:
+
+- handshake commands
+- snapshot transfer
+- later command replay from the master
+
+So bootstrap and steady-state replication intentionally share one TCP connection.
+
+## Handshake steps
+
+The follower issues four messages in order:
 
 1. `PING`
 2. `REPLCONF listening-port <port>`
 3. `REPLCONF capa psync2`
 4. `PSYNC ? -1`
 
-Each step writes a RESP array and then validates the master's response through `check_resp(...)`.
+`ping_master(...)`, `report_port(...)`, and `report_sync_protocol(...)` each:
 
-## `PSYNC` response handling
+- build a RESP array
+- write it to the socket
+- call `check_resp(...)`
 
-`start_psync(...)` sends the command and immediately delegates to `recv_rdb_file(...)`.
+`check_resp(...)` performs an exact byte comparison against the expected simple-string reply.
 
-That method expects:
+That is simple and readable, but it assumes the full expected reply arrives in one read.
 
-1. one line containing replication metadata such as `FULLRESYNC <id> <offset>`
-2. a `$<len>` header for the snapshot payload
-3. the raw RDB payload
+## `PSYNC` on the follower
 
-The snapshot bytes are then parsed by reusing `rdb::parse_rdb(...)`.
+`start_psync(...)` writes `PSYNC ? -1` and then immediately calls `recv_rdb_file(...)`.
 
-## Master-side `PSYNC` handling
+So from the follower's point of view, `PSYNC` means:
 
-On the master, `PSYNC` is recognized in two places:
+1. ask for full synchronization
+2. parse the master's `FULLRESYNC` line
+3. consume the following RDB payload
+4. leave the socket positioned for later live command replay
 
-- `Cmd::from(...)` maps the command into `Cmd::Psync`
-- `Server::handle(...)` special-cases that command after execution
+## `recv_rdb_file(...)`
 
-The runtime branch in `Server::handle(...)` does the critical work:
+`recv_rdb_file(...)` wraps the socket in `BufReader` and reads:
 
-1. call `send_rdb_file(...)`
-2. call `add_stream(...)`
-3. break out of the normal request loop
+1. one line ending in `\r\n` for replication metadata
+2. one `$<len>\r\n` header for the RDB payload length
+3. the RDB bytes themselves by delegating to `rdb::parse_rdb(...)`
 
-At that point the socket becomes a registered replica downstream.
+The first line is expected to contain three tokens, such as:
 
-## Why master behavior lives in `Server::handle(...)`
+```text
+FULLRESYNC <replid> <offset>
+```
 
-The code treats `PSYNC` as both:
+One detail is worth documenting exactly: the parsed `rdb_file_len` is logged, but not used to bound the snapshot read. The code relies on `rdb::parse_rdb(...)` reaching `EOF` inside the stream.
 
-- a logical command that returns `FULLRESYNC`
-- a connection-mode transition
+## Master-side `PSYNC`
 
-That second part cannot live entirely inside `cmd.rs`, because the server must keep the replica socket for future fan-out.
+On the master, `PSYNC` is handled across two modules.
 
-So the control flow is intentionally split:
+`cmd.rs` handles the command semantics:
 
-- command semantics -> `psync_cmd(...)`
-- socket ownership transition -> `Server::handle(...)`
+- `Cmd::from(...)` recognizes `psync`
+- `psync_cmd(...)` returns `FULLRESYNC <master_replid> 0` on a master
+
+`server.rs` handles the socket-state transition:
+
+1. `cmd.run(...)` produces the `FULLRESYNC` reply
+2. `Server::handle(...)` writes that reply as part of normal request/response flow
+3. `handle(...)` sees that the command was `Cmd::Psync`
+4. `MasterReplicationClient::send_rdb_file(...)` writes the snapshot payload
+5. `MasterReplicationClient::add_stream(...)` registers the socket for future fan-out
+6. `handle(...)` breaks out of the normal loop
+
+That split is important. `PSYNC` is not just another command handler because the socket has to change role afterward.
 
 ## Snapshot payload source
 
-`MasterReplicationClient::send_rdb_file(...)` currently sends a constant hex-encoded empty RDB image.
+`MasterReplicationClient::send_rdb_file(...)` does not serialize the live in-memory state.
 
-This is not a real serialization of live server state. It is a bootstrap seed that lets the protocol flow continue.
+Instead it decodes a hard-coded hex string named `EMPTY_RDB_FILE_HEX_STRING` and writes that payload to the follower.
 
-That is one of the biggest fidelity gaps relative to production Redis.
+So the current full-sync behavior is:
 
-## Write propagation
+- send a valid empty snapshot shell
+- rely on later command replay for subsequent writes
 
-Once replicas are registered, write propagation goes through `MasterReplicationClient::send_command(...)`.
+This is one of the clearest fidelity gaps relative to production Redis.
 
-The method:
+## Downstream replica registration
 
-1. locks the list of replica streams
-2. iterates over each socket
-3. writes the encoded protocol to every replica
+`MasterReplicationClient` stores replica sockets in:
 
-This is a simple broadcast fan-out model with no per-replica backpressure logic.
+```text
+Arc<Mutex<Vec<TcpStream>>>
+```
 
-## How command execution triggers replication
+`add_stream(...)` simply pushes the socket into that vector.
 
-Write-like commands in `cmd.rs` eventually call `resp_and_replicate(...)`.
+There is no separate replica metadata record for:
 
-That function behaves differently by role:
+- replica ID
+- health
+- last acknowledged offset
+- backpressure state
 
-- master -> send command to replicas, then return local response
-- slave on normal client connection -> reject writes
-- slave on replication connection -> accept replayed writes
+The master only remembers writable sockets.
 
-This is the module boundary where replication rules intersect with command semantics.
+## Command fan-out
+
+Once a replica is registered, write propagation happens through `send_command(...)`.
+
+The control flow is:
+
+1. lock the vector of replica streams
+2. iterate over each socket
+3. write `protocol.encode()` to every socket
+
+There is no per-replica retry or drop-on-failure policy beyond surfacing a write error.
+
+## Where replication intersects command execution
+
+Most write-like commands call `resp_and_replicate(...)` in `cmd.rs`.
+
+That helper applies the role rules:
+
+- master -> broadcast to downstream replicas, then return the local response
+- slave on ordinary client connection -> reject the write
+- slave on replication connection -> allow the replayed write
+
+This is the semantic hinge where replication policy meets command semantics.
 
 ## Offset tracking
 
-The server tracks a coarse replication offset in `server.offset`.
+The repo currently has two different offset notions.
 
-Successful command execution increments it using the encoded protocol length. `REPLCONF GETACK` reads from that value to report progress.
+Live shared counter:
 
-This is not a complete replication state machine, but it is enough to model the basic flow of acknowledged progress.
+- `server.offset`
+- updated inside `Cmd::run(...)`
+- also incremented manually inside some write helpers
+- used by `REPLCONF GETACK`
+
+Static configuration field:
+
+- `server.option.replication.master_repl_offset`
+- initialized in `main.rs`
+- returned by `INFO replication`
+
+So `GETACK` and `INFO replication` do not actually report the same live source of truth.
 
 ## Current implementation limits
 
-- snapshot source is a constant empty RDB payload
-- no partial resync
-- no backlog window
-- no replica liveness tracking
-- no retry or reconnect loop beyond startup path
+- full sync always sends a constant empty RDB payload
+- the follower does not enforce the advertised RDB payload length
+- there is no partial resync
+- there is no backlog window
+- there is no reconnect loop after startup
+- replica sockets are stored without health or metadata
+- offset reporting is internally inconsistent
 
-Even so, the code shows the essential educational shape of leader-follower replication: handshake, full sync, socket registration, then downstream command replay.
+Even so, the replication path still shows the essential educational shape: explicit handshake, full snapshot bootstrap, socket registration, then downstream command replay.
