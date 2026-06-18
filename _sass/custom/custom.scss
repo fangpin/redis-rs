@@ -1,0 +1,174 @@
+body {
+  background:
+    radial-gradient(circle at top left, rgba($link-color, 0.18), transparent 28%),
+    radial-gradient(circle at 85% 10%, rgba($redis-accent-strong, 0.12), transparent 18%),
+    linear-gradient(180deg, #050b14, #091426 45%, $body-background-color 100%);
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba($link-color, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba($link-color, 0.05) 1px, transparent 1px);
+  background-size: 72px 72px;
+  mask-image: linear-gradient(180deg, rgba(#fff, 0.45), transparent 82%);
+}
+
+.side-bar {
+  background: $redis-panel-background;
+  backdrop-filter: blur(18px);
+
+  @include mq(md) {
+    box-shadow: 18px 0 48px rgba(0, 0, 0, 0.26);
+  }
+}
+
+.site-header,
+.main-header {
+  backdrop-filter: blur(18px);
+}
+
+.site-header {
+  background: rgba($body-background-color, 0.82);
+}
+
+.side-bar + .main .main-header {
+  background: $redis-panel-background-strong;
+}
+
+.search-input-wrap,
+.search-results,
+.table-wrapper,
+.main-content blockquote,
+pre.highlight,
+.highlight pre {
+  border: 1px solid $border-color;
+  background: $redis-panel-background-strong;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.28);
+}
+
+.search-input-wrap {
+  border-radius: 12px;
+
+  @include mq(md) {
+    border-radius: 0;
+    border-left: 1px solid $border-color;
+  }
+}
+
+.search-input,
+.search-results,
+.search-result,
+.search-result-previews {
+  background-color: transparent;
+}
+
+.search-input {
+  color: $body-text-color;
+
+  &::placeholder {
+    color: rgba($body-text-color, 0.6);
+  }
+}
+
+.search-label .search-icon {
+  color: rgba($body-text-color, 0.62);
+}
+
+.search-result:hover,
+.search-result.active {
+  background-color: rgba($link-color, 0.12);
+}
+
+.site-title,
+.nav-list .nav-list-item .nav-list-link,
+.nav-list .nav-list-item .nav-list-expander,
+.aux-nav .site-button {
+  color: $body-heading-color;
+}
+
+.nav-list .nav-list-item .nav-list-link {
+  color: rgba($body-heading-color, 0.74);
+  transition: background 180ms ease, color 180ms ease;
+}
+
+.nav-list .nav-list-item .nav-list-link:hover,
+.nav-list .nav-list-item .nav-list-link.active,
+.site-title:hover,
+.site-button:hover {
+  background-image: linear-gradient(
+    -90deg,
+    rgba($link-color, 0.16) 0%,
+    rgba($link-color, 0.08) 80%,
+    rgba($link-color, 0) 100%
+  );
+}
+
+.nav-list .nav-list-item > .nav-list .nav-list-item .nav-list-link,
+.nav-list .nav-list-item > .nav-list .nav-list-item .nav-list-expander {
+  color: $nav-child-link-color;
+}
+
+.site-button {
+  color: $link-color;
+}
+
+.main-content {
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    color: $body-heading-color;
+  }
+
+  h2,
+  h3 {
+    padding-top: 0.9rem;
+    border-top: 1px solid rgba($border-color, 0.65);
+  }
+
+  a:not([class]) {
+    text-decoration-color: rgba($link-color, 0.45);
+  }
+
+  code {
+    color: $redis-accent-strong;
+  }
+
+  ul > li::before,
+  ol > li::before {
+    color: rgba($link-color, 0.75);
+  }
+
+  blockquote {
+    padding: 1rem 1.25rem;
+    border-left-color: rgba($link-color, 0.7);
+    border-radius: 0 12px 12px 0;
+  }
+}
+
+thead th {
+  background: rgba($link-color, 0.08);
+}
+
+tbody tr:nth-child(2n) td {
+  background: rgba($white, 0.02);
+}
+
+th,
+td {
+  border-color: rgba($border-color, 0.9);
+}
+
+hr {
+  background-color: $border-color;
+}
+
+.site-footer {
+  color: rgba($body-text-color, 0.65);
+}

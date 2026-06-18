@@ -1,5 +1,8 @@
 # 使用 Rust 构建你自己的 Redis
 
+项目主页: [https://fangpin.github.io/redis-rs/](https://fangpin.github.io/redis-rs/)
+文档总览: [https://fangpin.github.io/redis-rs/zh/docs/overview/](https://fangpin.github.io/redis-rs/zh/docs/overview/)
+
 该项目旨在构建一个玩具 Redis-Server，它能够解析 Redis 协议并处理基本的 Redis 命令; 将 Redis 持久化化到 RDB 文件中；从 RDB 文件解析和初始化 Redis，
 支持主从复制、Redis 流。
 

@@ -1,5 +1,8 @@
 # Build Your Own Redis in Rust
 
+Project site: [https://fangpin.github.io/redis-rs/](https://fangpin.github.io/redis-rs/)
+Docs overview: [https://fangpin.github.io/redis-rs/docs/overview/](https://fangpin.github.io/redis-rs/docs/overview/)
+
 This project is to build a toy Redis-Server clone that's capable of parsing Redis protocol and handling basic Redis commands, parsing and initializing Redis from RDB file,
 supporting leader-follower replication, redis streams (queue), redis batch commands in transaction.
 
