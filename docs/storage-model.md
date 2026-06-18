@@ -7,127 +7,198 @@ permalink: /docs/storage-model/
 
 # Storage Model
 
-This chapter covers the in-memory key-value storage layer and the stream container shape that sits beside it.
+This chapter covers the in-memory state containers behind string commands and stream commands.
 
 ## File boundaries
 
 - `src/storage.rs`
 - `src/server.rs`
+- `src/cmd.rs`
 
-## String key-value storage
+## Two storage families
 
-`src/storage.rs` defines the core storage type used for normal Redis string commands.
+The runtime does not keep every Redis data type in one universal value enum.
 
-The internal representation is:
+Instead it splits state into two separate containers:
+
+- string keys in `Storage`
+- streams in `Server::streams`
+
+That split is one of the main structural shortcuts in the repo. It avoids a generic object system and keeps the code readable by command family.
+
+## String-key storage shape
+
+`src/storage.rs` defines:
 
 ```text
 HashMap<String, (String, Option<u128>)>
 ```
 
-Each entry stores:
+The tuple means:
 
-- the string value
-- an optional absolute expiration timestamp in milliseconds
+- stored string value
+- optional expiration timestamp
 
-The type alias `ValueType` makes that tuple explicit in the code.
+The alias `ValueType` makes that explicit in code.
 
-## Why expiration is stored as an absolute timestamp
+## `Storage` API surface
 
-The storage layer does not keep:
+The public methods are small:
 
-- insertion time
-- relative TTL duration
+- `new()`
+- `get(...)`
+- `set(...)`
+- `setx(...)`
+- `del(...)`
+- `keys(...)`
 
-Instead, it stores an absolute expiration timestamp. That decision keeps reads simple:
+This API is intentionally narrower than Redis itself. Complex behavior stays in `cmd.rs`, while `Storage` mostly performs point lookups and writes.
 
-- compare `now_in_millis()` with stored timestamp
-- remove expired key if needed
-- otherwise return the value
+## Time source
 
-This matches the needs of both direct `SET PX/EX` writes and RDB restore.
+`now_in_millis()` converts `SystemTime` into Unix milliseconds.
 
-## `now_in_millis()`
+That helper is reused across subsystems:
 
-`now_in_millis()` is the time source for expiry behavior. It converts `SystemTime` into Unix milliseconds.
-
-That helper is reused in two places:
-
-- storage expiry checks
+- expiry handling in `Storage`
 - auto-generated stream IDs in `cmd.rs`
 
-So the project already treats millisecond time as a shared primitive across multiple subsystems.
+So millisecond time is already a shared runtime primitive.
 
-## Read path
+## Expiration model
 
-`Storage::get(...)` is more than a plain lookup.
+`Storage` stores expiration as one `Option<u128>` per key.
+
+The important detail is what `setx(...)` expects:
+
+```text
+relative duration in milliseconds
+```
+
+`setx(...)` always computes:
+
+```text
+now_in_millis() + expire_ms
+```
+
+This is the right fit for:
+
+- `SET PX <millis>`
+- `SET EX <seconds>` after command-layer conversion to milliseconds
+
+## `get(...)` and lazy expiry
+
+`Storage::get(...)` is the main read path.
 
 The control flow is:
 
-1. look up key in `HashMap`
-2. if key has an expiration timestamp, compare it with current time
-3. if expired, delete the key and return `None`
-4. otherwise clone and return the stored string
+1. look up the key in the `HashMap`
+2. check whether an expiration exists
+3. compare the stored timestamp with `now_in_millis()`
+4. if expired, remove the key and return `None`
+5. otherwise clone and return the stored value
 
-This is lazy expiration. Expired keys disappear when accessed, not through a background eviction loop.
+There is no background cleanup task. Expired keys disappear when they are touched.
 
 ## Write paths
 
-The write surface is intentionally narrow:
+`set(...)` stores a string with no expiry.
 
-- `set(...)` -> store value without expiry
-- `setx(...)` -> store value with expiry
-- `del(...)` -> remove key
-- `keys(...)` -> list current keys
+`setx(...)` stores a string with an absolute deadline derived from a relative TTL.
 
-`setx(...)` converts the provided relative TTL into an absolute timestamp by adding `now_in_millis()`.
+`del(...)` removes a key directly.
 
-That means callers do not need to share a common time conversion policy. They only need to provide a duration in milliseconds.
+`keys(...)` returns the current map keys without performing an expiry sweep first.
 
-## What is not stored here
+That last point matters: untouched expired keys can still appear in `KEYS *` until some later `GET` removes them.
 
-Streams are not part of `Storage`.
+## Stream container shape
 
-Instead, `Server` keeps a second container:
+Streams do not live inside `Storage`.
+
+The type aliases in `src/server.rs` expand to:
 
 ```text
 HashMap<String, BTreeMap<String, Vec<(String, String)>>>
 ```
 
-That separation matters because:
+Read it as:
 
-- string keys have optional expiry and simple point lookups
-- stream keys need ordered range queries by entry ID
+- stream name -> ordered entry map
+- entry ID -> field/value pairs
 
-Using `BTreeMap` for streams gives ordered traversal without complicating the ordinary string-key storage model.
+`BTreeMap` is the key design choice here. It gives ordered range traversal for `XRANGE` and `XREAD` without needing a separate secondary index.
 
-## How command handlers interact with storage
+## How command handlers reach storage
 
-Command helpers in `cmd.rs` typically access storage like this:
-
-1. lock `server.storage`
-2. call one storage method
-3. release lock
-
-Because `Storage` itself is synchronous and small, the async boundary lives outside it in the server's `Mutex`.
-
-## Data flow for string commands
-
-For commands such as `GET`, `SET`, `DEL`, and `INCR`, the data path is:
+Most command helpers in `src/cmd.rs` follow the same pattern:
 
 ```text
-command helper in cmd.rs
--> lock server.storage
--> call Storage method
+lock shared container
+-> call one small storage operation
 -> build Protocol response
 ```
 
-This is one reason the repo stays readable: command helpers remain thin adapters over a tiny storage core.
+Examples:
+
+- `GET` -> `storage.get(...)`
+- `SET` -> `storage.set(...)`
+- `SET PX/EX` -> `storage.setx(...)`
+- `DEL` -> `storage.del(...)`
+- `TYPE` -> check `storage`, then check `streams`
+
+This is why the storage layer stays simple: orchestration and role checks live above it.
+
+## Current behavior worth documenting exactly
+
+The docs need to reflect the current implementation, including shortcuts.
+
+Two details matter:
+
+1. `Storage` only stores strings. Numeric commands such as `INCR` still round-trip through string parsing.
+2. `setx(...)` always treats its third argument as a relative TTL.
+
+That second point creates a visible interaction with the RDB parser:
+
+- `parse_expire_entry(...)` decodes an absolute expiration timestamp from the snapshot
+- `parse_rdb(...)` currently forwards that value into `storage.setx(...)`
+
+So snapshot restore does not preserve absolute expiry exactly. The parsed timestamp is treated as a relative duration and shifted by the current wall clock again.
+
+That is not a docs nit. It is how the code behaves today.
+
+## Data flow for string commands
+
+The normal string-command path is:
+
+```text
+Cmd::run
+-> command helper in cmd.rs
+-> lock server.storage
+-> Storage method
+-> Protocol response
+```
+
+The stream-command path is similar but targets `server.streams` instead.
+
+## Extension boundaries
+
+If someone wanted to add more Redis types, the main pressure points are obvious:
+
+- `Storage` only knows string payloads
+- streams are modeled outside `Storage`
+- `TYPE` is hard-coded to probe exactly these two containers
+- command helpers directly know which container to lock
+
+So adding lists, sets, or hashes would likely require a new top-level state structure rather than a small local patch.
 
 ## Current implementation limits
 
-- all values are stored as strings
-- expiration cleanup is lazy, not proactive
-- there is no size accounting or eviction policy
-- `keys()` does not filter expired entries unless they were previously touched by `get()`
+- all normal values are strings
+- expiry cleanup is lazy
+- `keys()` does not sweep expired entries
+- stream data is completely separate from string storage
+- `setx(...)` only supports relative TTL semantics cleanly
+- there is no memory accounting, eviction policy, or persistence hook at this layer
 
-Those tradeoffs are reasonable for a teaching implementation and make the storage layer easy to inspect.
+The storage model is intentionally modest, but understanding these exact choices makes the command layer much easier to read.

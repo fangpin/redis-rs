@@ -1,121 +1,125 @@
 ---
 title: RDB 解析器
 layout: default
-nav_exclude: true
+nav_order: 6
 permalink: /zh/docs/rdb-parser/
 ---
 
 # RDB 解析器
 
-[返回首页]({{ '/' | relative_url }}) | [文档总览]({{ '/zh/docs/overview/' | relative_url }}) | [存储模型]({{ '/zh/docs/storage-model/' | relative_url }}) | [复制链路]({{ '/zh/docs/replication-flow/' | relative_url }})
-
-这一章把 RDB 快照解析单独抽出来讲，不和复制链路混在一起。
+这一章单独看 snapshot 解析器。它既服务本地恢复，也服务主从复制初始化。
 
 ## 文件边界
 
 - `src/rdb.rs`
 
-## 这个模块的职责
+## 模块职责
 
-`src/rdb.rs` 只做一件事：把 RDB 字节流解析成对 `server.storage` 的写入。
+`src/rdb.rs` 的职责很单一：把一个 RDB 字节流解析成内存写入。
 
-它被复用在两个场景：
+它会在两个地方被复用：
 
-- master 本地启动时从 DB 文件恢复
-- slave 从 master 下载快照后恢复
+- master 启动时从本地 DB 文件恢复
+- follower 复制握手后消费 master 发送过来的 snapshot
 
-这点很重要，因为仓库里只有一条 RDB 解码路径。
+这个复用很重要，因为仓库里只有一条 RDB 解码路径，没有“文件恢复版”和“网络复制版”两套实现。
 
 ## 入口函数
 
-模块对外有两个入口：
+当前有两个公开入口：
 
 - `parse_rdb_file(...)`
 - `parse_rdb(...)`
 
-`parse_rdb_file(...)` 只是包装了一层 `BufReader`。
+`parse_rdb_file(...)` 只是面向文件的包装器。
 
-真正的流式解析逻辑都在 `parse_rdb(...)` 里，它接受任何 `AsyncRead + Unpin`，所以网络流和文件流都能复用。
+它做的事只有：
 
-## 总体控制流
+1. 把 `tokio::fs::File` 包成 `BufReader`
+2. 转调 `parse_rdb(...)`
 
-`parse_rdb(...)` 的流程是：
+真正的解析逻辑都在 `parse_rdb(...)`。因为它接收的是 `AsyncRead + Unpin`，所以既能吃文件，也能吃网络流。
 
-1. 锁住 `server.storage`
-2. `parse_magic(...)`
-3. `parse_version(...)`
-4. 进入 opcode 循环
-5. 遇到 `EOF` 结束
+## 高层解析顺序
 
-循环里当前识别这些 opcode：
+`parse_rdb(...)` 一开始就锁住 `server.storage`，然后按这个顺序走：
 
-- `META`
-- `DB_SELECT`
-- `TABLE_SIZE_INFO`
-- `EOF`
+1. `parse_magic(...)`
+2. `parse_version(...)`
+3. 进入 opcode dispatch loop
+4. 遇到 `EOF` 结束
 
-其他 opcode 都直接报错。
+当前支持的 opcode 有：
 
-## Header 校验
+- `META` (`0xFA`)
+- `DB_SELECT` (`0xFE`)
+- `TABLE_SIZE_INFO` (`0xFB`)
+- `EOF` (`0xFF`)
 
-`parse_magic(...)` 会读取 5 个字节并校验是否为 `REDIS`。
+遇到其他值就会报错。
 
-`parse_version(...)` 再读取 4 个字节版本号。
+## 头部校验
 
-当前实现只验证结构，不做更细的版本分支逻辑。
+`parse_magic(...)` 会精确读取 5 个字节，并要求它等于 `REDIS`。
 
-## Metadata 段
+`parse_version(...)` 再读取 4 个字节版本号并原样返回。
 
-当遇到 `META` 时，代码会调用两次 `parse_aux(...)`，然后丢弃结果。
+这里做的是文件结构级别的校验，但后面没有按不同版本分支处理。
 
-也就是说 metadata 是“语法上解析了，但语义上忽略了”。
+## metadata 处理
 
-这个取舍很合理：
+循环读到 `META` 时，会连续调用两次 `parse_aux(...)`，然后直接丢掉结果。
 
-- 结构上贴近真实 RDB
-- 又不需要额外引入一套 metadata 模型
+也就是说，这个解析器“结构上知道 metadata 的存在”，但“语义上不使用它”。
 
-## DB 选择和表大小信息
+这很符合这个仓库的风格：
 
-`DB_SELECT` 会被读出来，但因为这个项目实际上只处理单个逻辑 DB，所以结果被忽略。
+- 尽量保持对真实格式的结构对齐
+- 但不为当前运行时用不到的状态额外建模
 
-`TABLE_SIZE_INFO` 则更关键，它提供：
+## DB 选择和 table size
 
-- 不带过期时间的 entry 数量
-- 带过期时间的 entry 数量
+`DB_SELECT` 会被解析，但结果被忽略，因为这个服务基本只当成一个逻辑 DB 来用。
 
-随后解析器就按这两个计数分别读取对应数量的 entry。
+`TABLE_SIZE_INFO` 则不只是装饰字段，它会驱动后续两段 entry 解析：
 
-## Entry 解析
+1. 读取 `size_no_expire`
+2. 读取 `size_expire`
+3. 解析对应数量的非过期 entry
+4. 解析对应数量的过期 entry
 
-目前有两条 entry 解析路径：
+也就是说，当前实现默认 snapshot 会按预期的分组顺序组织。
+
+## entry 解析函数
+
+每条记录会走两个不同 helper：
 
 - `parse_no_expire_entry(...)`
 - `parse_expire_entry(...)`
 
-两者都默认 value type 为字符串类型 `0`。
+`parse_no_expire_entry(...)` 会要求下一个字节必须是类型 `0`，然后通过 `parse_aux(...)` 读取 key 和 value。
 
-所以这个实现聚焦的是字符串键，而不是完整 Redis 类型矩阵。
+这说明当前解析器只支持字符串 value。
 
-## 过期时间解码
+`parse_expire_entry(...)` 则会先读过期前缀，再回到 `parse_no_expire_entry(...)` 解析正文。
 
-`parse_expire_entry(...)` 支持两种编码：
+当前支持两种过期编码：
 
-- `0xFC`：8 字节 little-endian 毫秒时间戳
-- `0xFD`：4 字节 little-endian 秒级时间戳
+- `0xFC` -> 8 字节 little-endian 毫秒时间戳
+- `0xFD` -> 4 字节 little-endian 秒级时间戳
 
-秒级时间戳会先转成毫秒，再写入存储层。
+秒级时间戳会立刻转成毫秒。
 
-这样整个仓库内部就统一成毫秒时间单位。
+## 长度解析
 
-## 长度与字符串解码
+`parse_len(...)` 是底层长度辅助函数。
 
-`parse_len(...)` 会解释 RDB 的长度前缀，并返回：
+它返回：
 
 - 解码后的长度
 - `StringEncoding`
 
-目前支持的字符串编码有：
+当前支持的编码类型有：
 
 - `Raw`
 - `I8`
@@ -123,30 +127,66 @@ permalink: /zh/docs/rdb-parser/
 - `I32`
 - `LZF`
 
-`parse_string(...)` 可以处理前四种，`LZF` 则明确返回“不支持”。
+`parse_string(...)` 除了 `LZF` 之外都能解码；遇到 `LZF` 会显式报错。
 
-## 如何写入存储层
+## 一个需要明确指出的实现细节：长度前缀支持仍然不完整
 
-entry 一旦解析出来，就会立刻写入 `storage`：
+当前实现显然是在尝试映射 Redis RDB 的长度前缀规则，但分支还没有完全对齐。
 
-- 不带过期 -> `storage.set(...)`
-- 带过期 -> `storage.setx(...)`
+例如，本来用于处理 14-bit length 的分支，当前匹配的是 `0x04`，不是 `0x40`。
 
-这里不会先构造一棵中间对象树，而是边读边落到运行时状态里。
+所以这个模块已经把“格式长什么样”表达出来了，但并没有完整覆盖所有前缀。
 
-## CRC 处理
+文档里应该把它当作当前实现限制，而不是写得像已经完整支持。
 
-读到 `EOF` 后，代码会再读 8 字节 CRC，但不会验证它。
+## 数据如何流入 storage
 
-也就是说文件尾结构被消费了，但校验逻辑还没实现。
+这个解析器不会先构建一个中间 snapshot 对象图，而是边读边写。
+
+普通 entry：
+
+```text
+parse_no_expire_entry
+-> storage.set(key, value)
+```
+
+过期 entry：
+
+```text
+parse_expire_entry
+-> storage.setx(key, value, expire_timestamp)
+```
+
+## 当前恢复路径里和过期时间有关的注意点
+
+这里必须按源码真实行为来写。
+
+`parse_expire_entry(...)` 解析出来的是“绝对过期时间戳”。
+
+但 `storage.setx(...)` 期待的是“相对 TTL 毫秒数”，并且会再加一遍 `now_in_millis()`。
+
+因此当前实现下，RDB 恢复出来的带过期 key 并不会精确保留原始绝对截止时间，而是会被再次当成相对 TTL 处理。
+
+## follower 初始化时的复用
+
+在复制握手阶段，`FollowerReplicationClient::recv_rdb_file(...)` 最终会调用 `rdb::parse_rdb(&mut reader, server)`。
+
+也就是说，follower 应用 master snapshot 时，用的还是同一套解析器、同一套写入逻辑，也包括上面提到的过期时间行为。
+
+## EOF 和 CRC
+
+读到 `EOF` 后，解析器会继续读取一个尾部 `u64` CRC 字段，但不会做校验。
+
+所以字节流对齐是对的，只是 checksum 还没有真正验证。
 
 ## 当前实现限制
 
-- 只支持 RDB 的一部分结构
-- metadata 被忽略
-- DB index 被忽略
-- 只处理字符串类型 entry
-- LZF 不支持
-- CRC 不校验
+- 只支持字符串 value
+- metadata 会解析但会被忽略
+- DB index 会解析但会被忽略
+- `LZF` 编码不支持
+- checksum 不校验
+- 长度前缀支持仍然不完整
+- 带过期时间的 snapshot entry 复用的是相对 TTL 写入接口
 
-尽管如此，这个解析器已经足够展示 Redis 持久化格式的关键骨架，并且能支撑本地恢复和复制快照恢复。
+即使有限制，`src/rdb.rs` 仍然是仓库里很值得细读的一块，因为它把“本地恢复”和“复制初始化”串进了同一条解码路径里。

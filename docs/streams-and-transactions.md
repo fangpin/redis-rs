@@ -7,148 +7,229 @@ permalink: /docs/streams-and-transactions/
 
 # Streams and Transactions
 
-This chapter zooms in on the two higher-level behaviors that extend the basic string command set: streams and transactional queueing.
+This chapter focuses on the two higher-level extensions layered on top of the basic string-command path: stream data and transaction queueing.
 
 ## File boundaries
 
 - `src/cmd.rs`
 - `src/server.rs`
+- `src/storage.rs`
 
-## Stream storage shape
+## Stream state shape
 
 Streams live in `Server::streams`, not in `Storage`.
 
-The type alias is:
+The full shape is:
 
 ```text
-BTreeMap<String, Vec<(String, String)>>
+HashMap<String, BTreeMap<String, Vec<(String, String)>>>
 ```
 
-and the full container is:
+Read it as:
 
-```text
-HashMap<String, Stream>
-```
+- stream name -> stream object
+- entry ID string -> ordered record
+- record -> list of field/value pairs
 
-That means:
+The `BTreeMap` is the core design choice. It gives the implementation sorted entry IDs and efficient range traversal without another index.
 
-- top-level key -> stream name
-- ordered map key -> entry id
-- value -> list of field/value pairs
+## Stream IDs and `split_offset(...)`
 
-The use of `BTreeMap` is what makes range queries possible without an extra ordering index.
+`split_offset(...)` is the low-level helper behind stream ordering.
 
-## Stream ID parsing
+Given an ID like:
 
-`split_offset(...)` is the low-level helper behind stream IDs.
+- `1526985054069-0`
+- `1526985054069-*`
+- `0-*`
 
-It extracts three pieces of information:
+it returns:
 
-- millisecond timestamp part
+- timestamp part
 - sequence part
-- whether the ID used a wildcard sequence
+- whether the original ID used a wildcard sequence
 
-This helper is reused by both writes and reads, so stream ordering logic stays in one place.
+This helper is reused by both write and read logic, which keeps stream-ID interpretation in one place.
 
 ## `XADD`
 
-`xadd_cmd(...)` handles stream writes.
+`xadd_cmd(...)` is the densest stream helper in the file.
 
 Its control flow is:
 
-1. normalize `*` into `now_in_millis()-*`
-2. split the incoming ID
-3. reject invalid `0-0`
-4. compare against current stream tail if one exists
-5. resolve wildcard sequence when needed
-6. insert field/value pairs into the target stream entry
-7. wake any blocked readers
-8. replicate the original command if needed
+1. if the incoming ID is `*`, rewrite it to `now_in_millis()-*`
+2. parse the ID with `split_offset(...)`
+3. reject explicit `0-0`
+4. lock `server.streams`
+5. create the target stream if missing
+6. compare the proposed ID against the stream tail
+7. if the ID used a wildcard sequence and shares the same timestamp as the tail, bump the sequence
+8. insert field/value pairs into the target entry
+9. wake blocked readers
+10. call `resp_and_replicate(...)`
 
-This is the densest stream command because it owns both ID validation and append semantics.
+The return value is the final inserted entry ID as a bulk string.
+
+## Ordering rule enforcement
+
+The stream tail comparison is one of the key behaviors:
+
+- lower timestamp than the tail -> reject
+- same timestamp and explicit sequence not greater than the tail -> reject
+- same timestamp and wildcard sequence -> auto-increment sequence
+
+That is how the implementation preserves monotonic stream IDs without a separate sequence allocator object.
 
 ## `XRANGE`
 
-`xrange_cmd(...)` converts the special Redis range sentinels:
+`xrange_cmd(...)` is structurally much simpler.
 
-- `-` -> start from zero
-- `+` -> end at max
+It:
 
-It then performs a `BTreeMap::range(...)` query and serializes the results back into a flat RESP array.
+1. locks `server.streams`
+2. resolves special sentinels
+3. performs `BTreeMap::range(...)`
+4. serializes the matching entries into `Protocol::Array`
 
-So the read path is effectively:
+Special bound handling:
+
+- `-` -> `"0"`
+- `+` -> `u64::MAX.to_string()`
+
+The response shape is flattened as alternating:
 
 ```text
-stream key
--> BTreeMap range
--> iterate ordered entries
--> encode as Protocol::Array
+entry-id, field-value-array, entry-id, field-value-array, ...
 ```
 
 ## `XREAD`
 
 `xread_cmd(...)` supports:
 
-- multiple streams
-- per-stream starting offsets
-- optional blocking mode
+- multiple stream keys
+- multiple starting offsets
+- optional `BLOCK`
 
-For blocking behavior there are two branches:
+The control flow is:
 
-- positive `BLOCK <millis>` -> sleep for that duration
-- `BLOCK 0` -> register a wake-up sender and wait for notification
+1. parse optional block duration earlier in `Cmd::from(...)`
+2. if `BLOCK <millis>` and `millis > 0`, sleep for that duration
+3. if `BLOCK 0`, register a sender in `server.stream_reader_blocker` and wait on the receiver
+4. lock `server.streams`
+5. for each stream, compute the exclusive-next starting ID
+6. perform `BTreeMap::range(...)`
+7. serialize results into one flat RESP array
 
-The second branch uses `server.stream_reader_blocker` as a lightweight waiter registry.
+The starting ID is made exclusive by incrementing the parsed sequence before building the range lower bound.
 
-## Reader wake-up model
+## Current blocking model
 
-After `XADD`, the code acquires `stream_reader_blocker`, sends one empty signal to each waiting reader, then clears the list.
+The waiter registry is:
 
-This is intentionally simple:
+```text
+Arc<Mutex<Vec<Sender<()>>>>
+```
 
-- no per-stream wait queues
-- no fairness logic
-- one global wake-up list
+After `XADD`, the code:
 
-It is good enough to demonstrate blocking reads without introducing a larger async coordination subsystem.
+1. locks that vector
+2. sends one empty signal to every sender
+3. clears the vector
 
-## Transaction queue model
+This is a deliberately small coordination mechanism:
 
-Transactions are represented by:
+- one global waiter list
+- no per-stream partitioning
+- no fairness policy
+- no explicit timeout cancellation path beyond normal control flow
+
+## Important current behavior: `BLOCK 0`
+
+The current `BLOCK 0` branch is intended to wait until some later `XADD` wakes the reader.
+
+But the receive loop is:
+
+```rust
+while let Some(_) = receiver.recv().await {
+    println!("get new xadd cmd, release block");
+}
+```
+
+and it does not break after the first wake-up.
+
+So the current implementation waits for channel closure rather than returning immediately after the first notification. That makes the infinite-block branch narrower in practice than the intended Redis behavior.
+
+## Transaction queue shape
+
+Transactions are not stored globally in `Server`.
+
+Instead, each connection loop in `Server::handle(...)` owns:
 
 ```text
 Option<Vec<(Cmd, Protocol)>>
 ```
 
-This queue is local to one connection inside `Server::handle(...)`.
+This makes transaction state:
 
-The important consequence is that transaction state does not live in the global server object. It belongs to the current client session.
+- connection-local
+- in-memory only
+- invisible to other clients
 
-## `MULTI`, `EXEC`, `DISCARD`
+That is the right shape for this repo, but it is worth stating explicitly.
 
-The transaction control flow is:
+## `MULTI`, `EXEC`, and `DISCARD`
 
-- `MULTI` -> initialize empty queue
-- ordinary commands while queue exists -> push `(Cmd, Protocol)` and return `QUEUED`
-- `EXEC` -> replay queued commands through `cmd.run(...)`
-- `DISCARD` -> drop queue
+Transaction control is implemented directly in `Cmd::run(...)` plus `exec_cmd(...)`.
 
-`exec_cmd(...)` is compact because it does not implement special transaction-only semantics. It just reuses the existing execution path with queueing disabled.
+`MULTI`:
 
-## Why transaction replay stores both `Cmd` and `Protocol`
+- replace `queued_cmd` with `Some(Vec::new())`
+- return `ok`
 
-The queue keeps both forms because they serve different purposes:
+Ordinary commands while a queue exists:
 
-- `Cmd` is the parsed semantic form used for dispatch
-- `Protocol` is still useful for replication and offset accounting
+- push `(Cmd, Protocol)` into the queue
+- return `QUEUED`
 
-That pairing avoids reparsing commands during replay.
+`EXEC`:
+
+1. iterate over queued commands
+2. call `cmd.run(server, protocol.clone(), is_rep_con, &mut None)` for each one
+3. collect every response into `Protocol::Array`
+4. clear the queue
+
+`DISCARD`:
+
+- if a queue exists, drop it and return `ok`
+- otherwise return `ERR Discard without MULTI`
+
+## Why the queue stores both `Cmd` and `Protocol`
+
+The pair is intentional.
+
+- `Cmd` is the already-parsed semantic form used for replay
+- `Protocol` is still needed by handlers that replicate or account based on the original message
+
+So `EXEC` can reuse the normal execution path without reparsing the raw command text.
+
+## Interactions with replication
+
+Queued commands are replayed through normal `cmd.run(...)`.
+
+That means transaction replay inherits the same downstream behavior as ordinary execution:
+
+- commands using `resp_and_replicate(...)` still replicate or reject by role
+- commands with their own local-only behavior, such as the current `INCR`, keep that behavior inside `EXEC` too
+
+This is a good example of how reusing one execution path keeps the implementation compact while also preserving current quirks.
 
 ## Current implementation limits
 
-- stream waiters are global rather than per stream key
-- `BLOCK <millis>` uses sleep instead of wake-on-event-with-timeout
-- transaction queueing is connection-local and non-persistent
-- stream and transaction semantics are narrower than real Redis edge cases
+- stream waiters are global rather than per stream
+- `BLOCK <millis>` sleeps first, then reads, instead of event-driven wait-with-timeout
+- `BLOCK 0` does not break after the first wake-up
+- stream replies are encoded in a flattened custom shape
+- transaction state is connection-local and non-persistent
+- transaction replay does not add separate atomic rollback semantics
 
-Even so, these features are implemented in a way that remains easy to follow from source.
+Even with those limits, streams and transactions are implemented in a way that is easy to trace from one file, which is exactly why they make good chapter boundaries in the docs.

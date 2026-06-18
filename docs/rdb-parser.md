@@ -7,7 +7,7 @@ permalink: /docs/rdb-parser/
 
 # RDB Parser
 
-This chapter isolates the local snapshot parser from the rest of the persistence and replication story.
+This chapter isolates the snapshot parser used for local restore and replica bootstrap.
 
 ## File boundary
 
@@ -15,104 +15,111 @@ This chapter isolates the local snapshot parser from the rest of the persistence
 
 ## Role of the module
 
-`src/rdb.rs` does one job: turn an RDB byte stream into writes against `server.storage`.
+`src/rdb.rs` turns an RDB byte stream into writes against in-memory state.
 
-It is reused in two different contexts:
+It is reused in two places:
 
-- local startup restore from a DB file
-- replica bootstrap after downloading a snapshot from the master
+- master startup restore from a local DB file
+- follower bootstrap after receiving the master's snapshot
 
-That reuse is one of the cleaner decisions in the repo. There is only one RDB decoding path.
+That reuse is important. The repo has one RDB decode path, not separate file and replication implementations.
 
 ## Entry functions
 
-There are two entrypoints:
+There are two public entrypoints:
 
 - `parse_rdb_file(...)`
 - `parse_rdb(...)`
 
-`parse_rdb_file(...)` is a convenience wrapper that creates a `BufReader` over a file.
+`parse_rdb_file(...)` is the file-oriented wrapper.
 
-`parse_rdb(...)` is the actual streaming parser and accepts any `AsyncRead + Unpin`, which is why replication can reuse it directly.
+Its job is only:
 
-## Overall control flow
+1. wrap a `tokio::fs::File` in `BufReader`
+2. delegate to `parse_rdb(...)`
 
-The parser starts by locking `server.storage`, then processes the stream in this order:
+`parse_rdb(...)` is the real parser. Because it accepts `AsyncRead + Unpin`, the same function can consume a file or a network stream.
+
+## High-level parse sequence
+
+`parse_rdb(...)` locks `server.storage` once at the beginning, then walks the stream in this order:
 
 1. `parse_magic(...)`
 2. `parse_version(...)`
 3. repeated opcode dispatch loop
 4. stop on `EOF`
 
-Inside the opcode loop, it recognizes:
+The opcode loop handles:
 
-- `META`
-- `DB_SELECT`
-- `TABLE_SIZE_INFO`
-- `EOF`
+- `META` (`0xFA`)
+- `DB_SELECT` (`0xFE`)
+- `TABLE_SIZE_INFO` (`0xFB`)
+- `EOF` (`0xFF`)
 
 Anything else is treated as an error.
 
 ## Header validation
 
-`parse_magic(...)` reads exactly five bytes and checks for `REDIS`.
+`parse_magic(...)` reads exactly five bytes and expects `REDIS`.
 
-`parse_version(...)` then reads the next four bytes as the RDB version payload.
+`parse_version(...)` reads the next four bytes and returns them unchanged.
 
-The parser validates structure here, but does not interpret version-specific feature differences.
+The parser validates the outer file structure here, but it does not branch on version-specific behavior later.
 
-## Metadata sections
+## Metadata handling
 
-When it sees `META`, the parser calls `parse_aux(...)` twice and then discards the results.
+When the loop sees `META`, it calls `parse_aux(...)` twice and discards both values.
 
-So metadata is syntactically parsed but semantically ignored.
+That means the parser is structurally aware of auxiliary sections, but semantically ignores them.
 
-That is a deliberate simplification:
+This is a good example of the repo's style:
 
-- keep the parser aligned with real RDB structure
-- avoid building a metadata model the server does not yet use
+- parse enough to stay aligned with the real file format
+- skip building state the rest of the server does not use
 
-## Database selection and table sizes
+## Database selection and table sizing
 
-`DB_SELECT` is parsed and ignored because this project effectively uses one logical DB.
+`DB_SELECT` is parsed but ignored because the server effectively behaves like a single logical DB.
 
-`TABLE_SIZE_INFO` is more operationally important. It provides:
+`TABLE_SIZE_INFO` is more than decoration. It drives the next two loops:
 
-- number of non-expiring entries
-- number of expiring entries
+1. read `size_no_expire`
+2. read `size_expire`
+3. parse that many non-expiring entries
+4. parse that many expiring entries
 
-The parser uses these counts to decide how many entries to read in each category.
+So this implementation assumes the snapshot is laid out in the expected grouped order.
 
-## Entry parsing
+## Entry readers
 
-There are two entry readers:
+The per-entry helpers are:
 
 - `parse_no_expire_entry(...)`
 - `parse_expire_entry(...)`
 
-Both currently assume string value type `0`.
+`parse_no_expire_entry(...)` expects the next byte to be type `0`, then reads key and value through `parse_aux(...)`.
 
-That means this parser is focused on string keys, not the full Redis type matrix.
+That means the parser currently supports only string values.
 
-## Expiration decoding
+`parse_expire_entry(...)` first reads an expiration opcode, then delegates back to `parse_no_expire_entry(...)`.
 
-`parse_expire_entry(...)` supports two encodings:
+Supported expiration encodings are:
 
 - `0xFC` -> 8-byte little-endian milliseconds
 - `0xFD` -> 4-byte little-endian seconds
 
-Second-based expiration is converted to milliseconds before being written into storage.
+Second-based values are converted to milliseconds immediately.
 
-This keeps the rest of the runtime on one time unit.
+## Length decoding
 
-## Length and string decoding
+`parse_len(...)` is the low-level helper behind strings and table sizes.
 
-`parse_len(...)` interprets Redis RDB length prefixes and returns:
+It returns:
 
 - decoded length
 - `StringEncoding`
 
-Supported string encodings are:
+Supported encodings are:
 
 - `Raw`
 - `I8`
@@ -120,30 +127,68 @@ Supported string encodings are:
 - `I32`
 - `LZF`
 
-`parse_string(...)` can decode every variant above except `LZF`, which returns an explicit error.
+`parse_string(...)` can decode every variant except `LZF`, which returns an explicit error.
+
+## A detail worth calling out: current prefix handling
+
+The implementation is clearly trying to model Redis RDB length prefixes, but the current branch structure is narrower than the ideal format support.
+
+In particular, the branch intended for 14-bit lengths matches on `0x04` rather than `0x40`.
+
+So the parser documents the shape of the format, but it does not yet implement every prefix correctly.
+
+That is best understood as a current limitation of this teaching implementation, not hidden as if full support existed.
 
 ## Data flow into storage
 
-Once entries are parsed, they are written immediately:
+The parser streams entries directly into runtime state.
 
-- non-expiring entry -> `storage.set(...)`
-- expiring entry -> `storage.setx(...)`
+For ordinary entries:
 
-The parser does not build an intermediate object graph. It streams values straight into runtime state.
+```text
+parse_no_expire_entry
+-> storage.set(key, value)
+```
 
-## CRC handling
+For expiring entries:
 
-When `EOF` is reached, the parser reads an 8-byte CRC field and ignores it.
+```text
+parse_expire_entry
+-> storage.setx(key, value, expire_timestamp)
+```
 
-So the file structure is consumed correctly, but checksum validation is not implemented.
+There is no intermediate snapshot object graph.
+
+## Current restore caveat for expirations
+
+This is one of the places where the docs need to describe current behavior exactly.
+
+`parse_expire_entry(...)` returns an absolute expiration timestamp from the RDB payload.
+
+But `storage.setx(...)` expects a relative TTL in milliseconds and adds `now_in_millis()` again.
+
+So expiring keys restored from an RDB file do not preserve the original absolute deadline exactly in the current implementation. Their deadline is effectively shifted forward by the current time once more.
+
+## Follower bootstrap reuse
+
+During replication bootstrap, `FollowerReplicationClient::recv_rdb_file(...)` eventually calls `rdb::parse_rdb(&mut reader, server)`.
+
+That means a follower applies the master's snapshot by reusing the same parser and the same storage-write behavior, including the expiration caveat above.
+
+## EOF and CRC
+
+When `EOF` is reached, the parser reads one trailing `u64` CRC field and ignores it.
+
+So the byte stream stays aligned, but checksum validation is not implemented.
 
 ## Current implementation limits
 
-- only a narrow subset of the RDB format is supported
-- metadata is ignored
-- DB index is ignored
-- only string-type entries are handled
+- only string values are supported
+- metadata is parsed then ignored
+- DB selection is parsed then ignored
 - LZF strings are rejected
-- CRC is not validated
+- checksum is not validated
+- the length-prefix implementation is partial
+- expiring snapshot entries are restored through a relative-TTL helper
 
-Even with those limits, the parser is detailed enough to explain the real shape of Redis persistence and to power both local restore and replica bootstrap.
+Even with those limits, `src/rdb.rs` is one of the most educational modules in the repo because it shows how local restore and replication bootstrap can share the same decoding pipeline.
